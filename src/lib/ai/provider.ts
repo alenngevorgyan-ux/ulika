@@ -33,30 +33,29 @@ interface ProviderConfig {
   model: string;
 }
 
-// Primary: OpenRouter, Grok 4.3 — deliberately less "corporate-polished"
-// default voice. Character is still built by the system prompt, not by
-// picking the most permissive model.
+// Primary: OpenRouter, Gemini 3.1 Flash-Lite — chosen for cost (~10x cheaper
+// than Grok 4.3) over the originally-briefed Grok. Voice/looseness is carried
+// entirely by the system prompt, not by model choice.
 // NOTE (2026-08-20): the originally-briefed "Grok 4.1 Fast" is deprecated on
-// OpenRouter (404s). Its direct successor grok-4.3 is ~6x pricier
-// ($1.25/$2.50 per M tokens vs the $0.20/$0.50 the brief was costed against).
-// If that matters, google/gemini-3.1-flash-lite ($0.125/$0.75/M) is a much
-// cheaper option — same one-line swap via AI_PROVIDER=gemini below.
+// OpenRouter (404s); its successor grok-4.3 is ~6x pricier than the brief's
+// budget. Kept as a one-line swap below (AI_PROVIDER=grok) if the founder
+// wants Grok's default tone back despite the cost.
 const PRIMARY: ProviderConfig = {
-  name: "openrouter",
+  name: "gemini",
   baseUrl: "https://openrouter.ai/api/v1/chat/completions",
   apiKeyEnv: "OPENROUTER_API_KEY",
-  model: "x-ai/grok-4.3",
+  model: "google/gemini-3.1-flash-lite",
 };
 
-// Fallback path — flip AI_PROVIDER=gemini or AI_PROVIDER=anthropic in env to
-// switch without touching call sites. Both still ride OpenRouter's unified
-// endpoint so no separate client code is needed.
+// Fallback path — flip AI_PROVIDER=grok or AI_PROVIDER=anthropic in env to
+// switch without touching call sites. All ride OpenRouter's unified endpoint
+// so no separate client code is needed.
 const FALLBACKS: Record<string, ProviderConfig> = {
-  gemini: {
-    name: "gemini",
+  grok: {
+    name: "openrouter",
     baseUrl: "https://openrouter.ai/api/v1/chat/completions",
     apiKeyEnv: "OPENROUTER_API_KEY",
-    model: "google/gemini-3.1-flash-lite",
+    model: "x-ai/grok-4.3",
   },
   anthropic: {
     name: "anthropic",
