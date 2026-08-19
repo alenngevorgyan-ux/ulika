@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# УЛИКА
 
-## Getting Started
+Наблюдательность, память, устный счёт и лёгкая ментальная магия — плюс AI-наставник
+**Марк Холодов**, который знает весь каталог тренировок и умеет собрать из него
+персональный план под конкретную цель пользователя.
 
-First, run the development server:
+Марк — оригинальный персонаж (имя, история и голос не связаны с сериалом
+«The Mentalist»/Патриком Джейном). "Менталист" здесь — обозначение профессии, как
+"детектив" или "фокусник".
+
+## Стек
+
+Next.js 16 (App Router) + TypeScript + Tailwind v4 + Supabase (auth, Postgres, RLS).
+AI — через OpenRouter, модель по умолчанию `x-ai/grok-4.1-fast`, переключается одной
+строкой в `src/lib/ai/provider.ts`.
+
+## Страницы
+
+- `/` — лендинг + превью каталога
+- `/train` — 10 тренировок (память/наблюдение/счёт/фокусы) + 10 этичных
+  психологических приёмов, каждая с LEARN→TRY→FIELD TEST и критерием мастерства
+- `/chat` — диалог с Марком
+- `/plan` — персональный план, который Марк сохраняет через `save_learning_plan`
+
+## Запуск
 
 ```bash
+npm install
+cp .env.local.example .env.local   # заполнить ключи
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Без `OPENROUTER_API_KEY` сайт полностью работает (лендинг, каталог, тренировки),
+но `/chat` честно сообщает, что AI не настроен, вместо ошибки. Без Supabase-ключей
+`/plan` тоже не падает — просто говорит, что сохранение появится после подключения.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Инфраструктура — что нужно завести
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **OpenRouter**: получить ключ на openrouter.ai, положить в `OPENROUTER_API_KEY`
+   (в Vercel — как переменную окружения, не в код).
+2. **Supabase**: создать проект, применить `supabase/schema.sql` в SQL Editor,
+   взять `Project URL` и `anon public key` → `NEXT_PUBLIC_SUPABASE_URL` /
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Магик-линк работает из коробки через
+   Supabase Auth — включать Google/другие провайдеры отдельно, если нужно.
+3. **Vercel**: `vercel --prod` из корня проекта, добавить те же переменные окружения
+   в Vercel Dashboard → Settings → Environment Variables.
 
-## Learn More
+## Что сознательно не сделано на этом этапе
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Маркетплейс контента от сторонних экспертов, платежи, кланы/рейтинги — вне MVP.
