@@ -33,14 +33,19 @@ interface ProviderConfig {
   model: string;
 }
 
-// Primary: OpenRouter, Grok 4.1 Fast — cheap, huge context, deliberately
-// less "corporate-polished" default voice. Character is still built by the
-// system prompt, not by picking the most permissive model.
+// Primary: OpenRouter, Grok 4.3 — deliberately less "corporate-polished"
+// default voice. Character is still built by the system prompt, not by
+// picking the most permissive model.
+// NOTE (2026-08-20): the originally-briefed "Grok 4.1 Fast" is deprecated on
+// OpenRouter (404s). Its direct successor grok-4.3 is ~6x pricier
+// ($1.25/$2.50 per M tokens vs the $0.20/$0.50 the brief was costed against).
+// If that matters, google/gemini-3.1-flash-lite ($0.125/$0.75/M) is a much
+// cheaper option — same one-line swap via AI_PROVIDER=gemini below.
 const PRIMARY: ProviderConfig = {
   name: "openrouter",
   baseUrl: "https://openrouter.ai/api/v1/chat/completions",
   apiKeyEnv: "OPENROUTER_API_KEY",
-  model: "x-ai/grok-4.1-fast",
+  model: "x-ai/grok-4.3",
 };
 
 // Fallback path — flip AI_PROVIDER=gemini or AI_PROVIDER=anthropic in env to
