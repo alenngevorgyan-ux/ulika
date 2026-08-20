@@ -68,13 +68,34 @@ fabricated quotes surviving a check against the source text.
 Nothing in this batch — no new written content was generated. The 12-direction
 content expansion (Block 3) was not started, so there is no prose to proofread.
 
+**Block 6 — planner as its own call.** `src/lib/planner/build.ts` plus
+`/api/plan`. Takes the dossier, active tracks, retrieved chunks and the stated
+pace/horizon; returns stages with a track, a depth layer and a day count. Stages
+pointing at slugs that do not exist are dropped, because a plan that sends you
+to a 404 is worse than a shorter plan. Depth layers are constrained by the
+horizon — a fortnight gets core only.
+
+Every plan carries a `caveat` naming its own honest weakness, and the model is
+told never to make it reassuring. A real one from testing: "builds comfort in
+low-stakes rehearsals but does not cover salary research, market benchmarking,
+or how you'll hold up in an actual high-stakes conversation."
+
+Dossier → suggested tracks is on the same route (GET). Rate-limited to once a
+fortnight, skips anything already running, and the matcher is told to return
+nothing far more often than it matches — an adjacent method is a wrong
+recommendation dressed as insight, and it costs more trust than it gains.
+
+Verified: two goals at different horizons produced 4 stages each, 0 invalid
+slugs, day counts summing exactly to the horizon, and depth correctly limited
+to core at 14 days while allowing deepening at 45.
+
 ### Deliberately not in this batch
 
 - **Block 3** — 12 directions × 3-5 notes each, and 5 full interactive lessons.
   This is the largest remaining piece and it is content work, where quality per
   item matters more than throughput.
-- **Block 6** — planner as its own model call, and dossier → suggested_tracks.
-  Table exists, engine does not.
+- **Block 6 UI** — the engine and endpoint exist and are tested, but /plan does
+  not yet render a generated plan or show the suggestion card. API only.
 - **Block 1, OpenStax full ingest** — blocked on licensing, not effort. See below.
 - **Block 7 page sweep** — tokens are in and the chat is rebuilt on them, but
   /, /train, /dossier, /intake still use the older class names. They render
