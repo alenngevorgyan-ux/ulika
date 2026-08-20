@@ -1,6 +1,8 @@
 import { getServerSupabase } from "@/lib/supabase/server";
 import { TRAININGS } from "@/lib/content/trainings";
 import PlanList from "./PlanList";
+import SignInForm from "./SignInForm";
+import SignOutButton from "./SignOutButton";
 
 interface PlanItem {
   slug: string;
@@ -39,7 +41,10 @@ export default async function PlanPage() {
     return (
       <div className="mx-auto max-w-2xl px-6 py-16">
         <h1 className="font-display text-3xl mb-4">Мой план</h1>
-        <p className="text-muted">Войди в аккаунт, чтобы видеть планы, которые собирает Марк.</p>
+        <p className="text-muted mb-6">
+          Войди по почте, чтобы видеть планы, которые собирает Марк, и сохранять новые.
+        </p>
+        <SignInForm />
       </div>
     );
   }
@@ -53,7 +58,10 @@ export default async function PlanPage() {
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-16">
-      <h1 className="font-display text-3xl mb-2">Мой план</h1>
+      <div className="flex items-baseline justify-between mb-2">
+        <h1 className="font-display text-3xl">Мой план</h1>
+        <SignOutButton />
+      </div>
       <p className="text-muted mb-10">Планы, которые собрал Марк по твоим целям.</p>
 
       {!plans || plans.length === 0 ? (
