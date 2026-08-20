@@ -119,11 +119,23 @@ async function main() {
 
       const parts = chunksFor(entry);
 
-      // Embed the definition together with the content: a query about a
-      // situation matches the framing as well as the body text.
+      // Embedding text leads with WHEN THIS APPLIES, not with the mechanism.
+      //
+      // First attempt embedded "Title — Chapter. Content", which is
+      // explanatory prose, while real queries are situational sentences. That
+      // mismatch produced weak discrimination (similarities clustered at
+      // 0.29-0.38) and one outright collision: "my coworker was weirdly cold"
+      // retrieved Cold reading and the Barnum effect, matching the term of art
+      // rather than the meaning. Front-loading the situation cues puts the
+      // vector in the same register as the question being asked.
       const vectors = DRY
         ? parts.map(() => [])
-        : await embed(parts.map((p) => `${entry.title} — ${p.chapter_title}. ${p.content}`));
+        : await embed(
+            parts.map(
+              (p) =>
+                `Applies when: ${entry.cues.join(", ")}. ${p.short_definition} ${entry.title} — ${p.chapter_title}: ${p.content}`
+            )
+          );
 
       if (supabase) {
         const rows = parts.map((p, i) => ({
