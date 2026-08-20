@@ -118,7 +118,10 @@ function Questions({ items }: { items: string[] }) {
   return (
     <div>
       <Label>What I need to know</Label>
-      <ol className="space-y-3">
+      {/* list-none: the ol marker and our own number were both rendering,
+          which showed up as "1. 1What happened". Ours stays because it is
+          styled and aligned with the rest of the chat furniture. */}
+      <ol className="space-y-3 list-none">
         {items.map((q, i) => (
           <li key={i}>
             <button

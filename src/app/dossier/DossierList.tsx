@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { getBrowserSupabase } from "@/lib/supabase/client";
+import { Stamp } from "@/components/chat/primitives";
+import FeedbackPrompt from "@/components/FeedbackPrompt";
 
 export interface DossierRow {
   id: string;
@@ -23,6 +25,7 @@ const GROUPS: { kind: DossierRow["kind"]; label: string; blurb: string }[] = [
 
 export default function DossierList({ rows }: { rows: DossierRow[] }) {
   const [state, setState] = useState(rows);
+  const [justClosed, setJustClosed] = useState(false);
 
   async function remove(id: string) {
     const supabase = getBrowserSupabase();
@@ -36,6 +39,7 @@ export default function DossierList({ rows }: { rows: DossierRow[] }) {
     if (!supabase) return;
     const next = row.status === "open" ? "closed" : "open";
     setState((prev) => prev.map((r) => (r.id === row.id ? { ...r, status: next } : r)));
+    if (next === "closed") setJustClosed(true);
     await supabase.from("mentalist_memory").update({ status: next }).eq("id", row.id);
   }
 
@@ -54,7 +58,8 @@ export default function DossierList({ rows }: { rows: DossierRow[] }) {
               {items.map((row) => (
                 <div
                   key={row.id}
-                  className="group bg-panel border border-panel-border rounded-lg px-4 py-3 flex items-start gap-3"
+                  className="group card-hover border rounded-lg px-4 py-3 flex items-start gap-3"
+                  style={{ background: "var(--panel)", borderColor: "var(--line)" }}
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -81,12 +86,14 @@ export default function DossierList({ rows }: { rows: DossierRow[] }) {
 
                   <div className="flex items-center gap-3 shrink-0">
                     {row.kind === "situation" && (
-                      <button
-                        onClick={() => toggleStatus(row)}
-                        className="text-[10px] font-mono uppercase tracking-wider text-muted hover:text-accent transition-colors"
-                      >
-                        {row.status === "open" ? "Done" : "Reopen"}
-                      </button>
+                      <Stamp trigger={row.status}>
+                        <button
+                          onClick={() => toggleStatus(row)}
+                          className="text-[10px] font-mono uppercase tracking-wider text-muted hover:text-accent transition-colors"
+                        >
+                          {row.status === "open" ? "Done" : "Reopen"}
+                        </button>
+                      </Stamp>
                     )}
                     <button
                       onClick={() => remove(row.id)}
@@ -102,6 +109,8 @@ export default function DossierList({ rows }: { rows: DossierRow[] }) {
           </section>
         );
       })}
+
+      {justClosed && <FeedbackPrompt page="dossier" />}
     </div>
   );
 }

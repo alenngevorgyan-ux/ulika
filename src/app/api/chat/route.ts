@@ -98,7 +98,7 @@ export async function POST(req: NextRequest) {
   let savedPlan: unknown = null;
 
   // Tool-calling loop, bounded to keep latency and cost predictable.
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < 5; round++) {
     let result;
     try {
       result = await chatComplete(conversation, { tools: TOOL_DEFS });
@@ -199,6 +199,37 @@ export async function POST(req: NextRequest) {
         content: JSON.stringify(toolResult),
       });
     }
+  }
+
+  // Loop exhausted. Rather than returning an apology string — which is what
+  // the user actually saw, and which reads as a broken product — ask once more
+  // with tools removed, so the model has no option but to answer. Observed
+  // cause: the catalog tool result is large enough that the model keeps
+  // reaching for another call instead of committing to a reply.
+  try {
+    const { message } = await chatComplete(
+      [
+        ...conversation,
+        {
+          role: "user",
+          content:
+            "Answer now, in the JSON block format. Do not call any more tools — you have everything you need.",
+        },
+      ],
+      { tools: undefined }
+    );
+    const reply = message.content ?? "";
+    if (reply.trim()) {
+      return NextResponse.json({
+        reply,
+        configured: true,
+        savedPlan,
+        retrieval: routed.mode,
+        mode: "advising",
+      });
+    }
+  } catch (err) {
+    console.error("chat route final-pass error:", err instanceof Error ? err.message : err);
   }
 
   return NextResponse.json({

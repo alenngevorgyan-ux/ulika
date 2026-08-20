@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { Lesson, LessonBlock } from "@/lib/content/lessonTypes";
 import { getBrowserSupabase } from "@/lib/supabase/client";
 import { ILLUSTRATIONS } from "@/components/lesson/Illustrations";
+import FeedbackPrompt from "@/components/FeedbackPrompt";
 
 /** Learner-supplied answers, keyed by storeAs. Persisted per lesson. */
 type Store = Record<string, string>;
@@ -98,6 +99,10 @@ export default function LessonPlayer({ lesson }: { lesson: Lesson }) {
       </div>
 
       <BlockView key={index} block={block} store={store} set={set} storeKey={`response-${index}`} />
+
+      {/* Only on the last screen — asking mid-lesson interrupts the thing we
+          are asking about. */}
+      {isLast && <FeedbackPrompt page={`lesson:${lesson.slug}`} />}
 
       <div className="flex gap-3 mt-10 pt-6 border-t border-panel-border">
         {index > 0 && (

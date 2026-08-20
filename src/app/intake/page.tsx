@@ -45,13 +45,13 @@ export default function IntakePage() {
               This is past what this app should be handling.
             </h1>
             <p className="text-sm leading-relaxed mb-6">{HANDOFF_NOTE}</p>
-            <div className="bg-panel border border-accent/40 rounded-lg p-5 mb-8">
+            <div className="rounded-lg p-5 mb-8 border" style={{ background: "var(--panel)", borderColor: "var(--accent-brass)" }}>
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent mb-3">
                 {set.heading}
               </p>
               <div className="space-y-1.5">
                 {set.lines.map((l, i) => (
-                  <p key={i} className="text-sm leading-relaxed">
+                  <p key={i} className="crisis-action text-sm leading-relaxed py-1">
                     {l}
                   </p>
                 ))}
@@ -117,11 +117,13 @@ export default function IntakePage() {
                 <button
                   key={label}
                   onClick={() => setAnswers((a) => ({ ...a, [item.id]: v }))}
-                  className={`text-sm px-4 py-2 rounded-md border transition-colors ${
-                    answers[item.id] === v
-                      ? "border-accent bg-accent/10 text-foreground"
-                      : "border-panel-border bg-panel text-muted hover:border-accent/50"
-                  }`}
+                  className="text-sm px-4 py-2 rounded-md border"
+                  style={{
+                    background: answers[item.id] === v ? "color-mix(in srgb, var(--accent-brass) 10%, transparent)" : "var(--panel)",
+                    borderColor: answers[item.id] === v ? "var(--accent-brass)" : "var(--line)",
+                    color: answers[item.id] === v ? "var(--text)" : "var(--muted)",
+                    transition: "border-color var(--dur-micro) var(--ease-expo-out), background var(--dur-micro) var(--ease-expo-out)",
+                  }}
                 >
                   {label}
                 </button>

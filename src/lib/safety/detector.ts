@@ -44,7 +44,38 @@ Rules:
 - Fiction, hypotheticals, historical events long resolved, song lyrics, and academic discussion do NOT trigger.
 - Someone saying a situation is "killing me" or "I could kill him" as ordinary figures of speech does NOT trigger.
 - Ordinary conflict, unfairness, sadness, stress, breakups and frustration do NOT trigger.
-- When genuinely uncertain between triggering and not, trigger. A false positive is a recoverable awkward moment. A miss is not.`;
+
+THE DISCRIMINATOR THAT MATTERS MOST — read it carefully.
+
+Ambition language and despair language point in opposite directions, and they
+share vocabulary. Look at the ORIENTATION, not the words.
+
+AMBITION: life is an opponent to defeat, a game to win, a thing to conquer.
+The speaker wants MORE of life, on better terms. This never triggers.
+Examples that must NOT trigger, in any language:
+  "I want to win at life" / "хочу выиграть в жизни" / "победа над жизнью"
+  "I want to conquer this" / "I want to beat life" / "победить жизнь"
+  "I can't finish anything" / "ниче не могу заканчивать" / "ничего не довожу до конца"
+  "I'm tired of myself" / "I want to stop being this person"
+Frustration at your own inaction is not a disclosure of self-harm. It is the
+most common thing anyone says to a mentor.
+
+DESPAIR: the speaker wants LESS of life, or to be absent from it. The self is
+the object. This triggers.
+  "I don't want to be here" / "не хочу больше жить" / "лучше бы меня не было"
+  "everyone would be better off without me" / "what's the point of any of it"
+  "I won't be around much longer"
+
+If a message combines ambition framing with frustration, that is an ordinary
+person wanting to do better, not a crisis. Do not trigger.
+
+- The user may write in any language. Judge the meaning, not a keyword match,
+  and never treat an unfamiliar idiom as evidence on its own.
+- When genuinely uncertain between triggering and not, trigger. A false positive
+  is a recoverable awkward moment. A miss is not. But note that an ambition
+  statement is NOT an uncertain case — it is a clear non-trigger, and treating
+  it as one is its own harm: it tells someone reaching for more that you heard
+  them reaching for less.`;
 
 const VALID: CrisisType[] = [
   "suicide_self_harm",
