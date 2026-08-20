@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { stripMarkdown } from "@/lib/stripMarkdown";
+import MentalistReply from "@/components/MentalistReply";
 
 interface Message {
   role: "user" | "assistant";
@@ -100,7 +100,7 @@ export default function ChatPage() {
         body: JSON.stringify({ messages: nextMessages }),
       });
       const data = await res.json();
-      const reply = stripMarkdown(data.reply ?? "Nothing came back. Try again.");
+      const reply = data.reply || "Nothing came back. Try again.";
       const done = [...nextMessages, { role: "assistant" as const, content: reply }];
       persist(
         withUser.map((c) =>
@@ -148,13 +148,13 @@ export default function ChatPage() {
           {active?.messages.map((m, i) => (
             <div
               key={i}
-              className={`rounded-lg px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
+              className={`rounded-lg px-4 py-3 ${
                 m.role === "user"
-                  ? "ml-auto max-w-[80%] bg-accent text-background"
-                  : "max-w-[90%] bg-panel border border-panel-border"
+                  ? "ml-auto max-w-[80%] bg-accent text-background text-sm leading-relaxed whitespace-pre-wrap"
+                  : "max-w-[92%] bg-panel border border-panel-border"
               }`}
             >
-              {m.content}
+              {m.role === "user" ? m.content : <MentalistReply content={m.content} />}
             </div>
           ))}
           {loading && (

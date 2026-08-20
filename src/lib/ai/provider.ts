@@ -82,7 +82,7 @@ export interface ChatCompleteResult {
 
 export async function chatComplete(
   messages: AiMessage[],
-  opts: { tools?: AiToolDef[]; temperature?: number } = {}
+  opts: { tools?: AiToolDef[]; temperature?: number; model?: string } = {}
 ): Promise<ChatCompleteResult> {
   const cfg = activeConfig();
   const apiKey = process.env[cfg.apiKeyEnv];
@@ -99,7 +99,9 @@ export async function chatComplete(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: cfg.model,
+      // Per-call override lets cheap background work (memory extraction) run on
+      // a cheap model without changing the conversation model.
+      model: opts.model ?? cfg.model,
       messages,
       tools: opts.tools,
       temperature: opts.temperature ?? 0.8,

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { chatComplete, isAiConfigured, type AiMessage } from "@/lib/ai/provider";
-import { MENTALIST_SYSTEM_PROMPT } from "@/lib/mentalist/systemPrompt";
+import { buildSystemPrompt } from "@/lib/mentalist/systemPrompt";
 import { TOOL_DEFS, getTrainingCatalog, validatePlanArgs, type SavePlanArgs } from "@/lib/mentalist/tools";
+import { loadMemory, extractMemory, saveMemory } from "@/lib/mentalist/memory";
 import { getServerSupabase } from "@/lib/supabase/server";
 
 export const maxDuration = 60;
@@ -37,22 +38,31 @@ export async function POST(req: NextRequest) {
   const {
     data: { user },
   } = supabase ? await supabase.auth.getUser() : { data: { user: null } };
+  const userId = user?.id ?? null;
+
+  // Knowledge retrieval reads the recent conversation, not just the last line —
+  // the relevant lens is often set by context a few turns back.
+  const recentText = body.messages
+    .slice(-6)
+    .map((m) => m.content)
+    .join("\n");
+
+  const memoryBlock = await loadMemory(supabase, userId);
 
   const conversation: AiMessage[] = [
-    { role: "system", content: MENTALIST_SYSTEM_PROMPT },
+    { role: "system", content: buildSystemPrompt(recentText, memoryBlock) },
     ...body.messages.map((m) => ({ role: m.role, content: m.content }) as AiMessage),
   ];
 
   let savedPlan: unknown = null;
 
-  // Tool-calling loop: at most 4 round-trips to keep latency/cost bounded.
+  // Tool-calling loop, bounded to keep latency and cost predictable.
   for (let round = 0; round < 4; round++) {
     let result;
     try {
       result = await chatComplete(conversation, { tools: TOOL_DEFS });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown AI error";
-      console.error("chat route AI error:", message);
+      console.error("chat route AI error:", err instanceof Error ? err.message : err);
       return NextResponse.json(
         { reply: "Can't reach me right now. Try again in a minute.", configured: true },
         { status: 200 }
@@ -63,11 +73,20 @@ export async function POST(req: NextRequest) {
     conversation.push(message);
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      return NextResponse.json({
-        reply: message.content,
-        configured: true,
-        savedPlan,
-      });
+      const reply = message.content ?? "";
+
+      // Memory extraction is awaited, not fire-and-forget: a serverless
+      // container can freeze the moment the response goes out, and a write
+      // that never lands is worse than one that costs 300ms.
+      if (userId && supabase) {
+        const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
+        if (lastUser) {
+          const rows = await extractMemory(lastUser.content, reply);
+          await saveMemory(supabase, userId, rows);
+        }
+      }
+
+      return NextResponse.json({ reply, configured: true, savedPlan, remembers: Boolean(memoryBlock) });
     }
 
     for (const call of message.tool_calls) {
@@ -80,12 +99,11 @@ export async function POST(req: NextRequest) {
         try {
           args = JSON.parse(call.function.arguments);
         } catch {
-          toolResult = { error: "Could not parse plan arguments" };
           conversation.push({
             role: "tool",
             tool_call_id: call.id,
             name: call.function.name,
-            content: JSON.stringify(toolResult),
+            content: JSON.stringify({ error: "Could not parse plan arguments" }),
           });
           continue;
         }
@@ -93,7 +111,7 @@ export async function POST(req: NextRequest) {
         const validationError = validatePlanArgs(args);
         if (validationError) {
           toolResult = { error: validationError };
-        } else if (!user || !supabase) {
+        } else if (!userId || !supabase) {
           toolResult = {
             saved: false,
             note: "Not signed in, so the plan was shown but not saved to an account.",
@@ -102,7 +120,7 @@ export async function POST(req: NextRequest) {
           const { data, error } = await supabase
             .from("learning_plans")
             .insert({
-              user_id: user.id,
+              user_id: userId,
               goal: args.goal,
               items: args.items.map((item, i) => ({ ...item, order: i, completed: false })),
             })
