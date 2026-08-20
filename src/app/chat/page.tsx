@@ -1,7 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import MentalistReply from "@/components/MentalistReply";
+import ReplyBlocks from "@/components/chat/ReplyBlocks";
+import ThinkingIndicator from "@/components/chat/ThinkingIndicator";
+import { ModeIndicator } from "@/components/chat/primitives";
+import { parseBlocks } from "@/lib/mentalist/parseBlocks";
 
 interface Message {
   role: "user" | "assistant";
@@ -13,6 +16,9 @@ interface Conversation {
   title: string;
   messages: Message[];
   updatedAt: number;
+  /** Sticky for the session once the detector fires — see the container below. */
+  crisis?: boolean;
+  mode?: "exploring" | "advising";
 }
 
 const STORAGE_KEY = "ulika-conversations";
@@ -101,10 +107,22 @@ export default function ChatPage() {
       });
       const data = await res.json();
       const reply = data.reply || "Nothing came back. Try again.";
+      const wasCrisis = Boolean(data.crisis);
       const done = [...nextMessages, { role: "assistant" as const, content: reply }];
       persist(
         withUser.map((c) =>
-          c.id === active.id ? { ...c, messages: done, updatedAt: Date.now() } : c
+          c.id === active.id
+            ? {
+                ...c,
+                messages: done,
+                updatedAt: Date.now(),
+                // Sticky: once a serious disclosure has happened, the decorative
+                // layer stays down for the rest of this conversation rather than
+                // springing back on the next ordinary message.
+                crisis: c.crisis || wasCrisis,
+                mode: data.mode ?? c.mode,
+              }
+            : c
         )
       );
     } catch {
@@ -136,7 +154,21 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-8 flex gap-6 h-[calc(100vh-73px)]">
+    <div
+      className="mx-auto max-w-6xl px-6 py-8 flex gap-6 h-[calc(100vh-73px)]"
+      data-crisis={active?.crisis ? "true" : undefined}
+      style={{
+        // A 2-3% tonal shift, not a colour change. Nobody should be able to
+        // name it; they should just feel the register is different.
+        ["--mode-tint" as string]:
+          active?.crisis
+            ? "transparent"
+            : active?.mode === "advising"
+              ? "color-mix(in srgb, var(--accent-brass) 3%, transparent)"
+              : "color-mix(in srgb, var(--accent-teal) 3%, transparent)",
+        background: "var(--mode-tint)",
+      }}
+    >
       {/* Conversation */}
       <div className="flex-1 flex flex-col min-w-0">
         <h1 className="font-display text-2xl mb-1">The Mentalist</h1>
@@ -154,12 +186,26 @@ export default function ChatPage() {
                   : "max-w-[92%] bg-panel border border-panel-border"
               }`}
             >
-              {m.role === "user" ? m.content : <MentalistReply content={m.content} />}
+              {m.role === "user" ? (
+                m.content
+              ) : (
+                <>
+                  {!active?.crisis && active?.mode && i === (active?.messages.length ?? 0) - 1 && (
+                    <div className="flex justify-end mb-2">
+                      <ModeIndicator mode={active.mode} />
+                    </div>
+                  )}
+                  <ReplyBlocks
+                    blocks={parseBlocks(m.content).blocks}
+                    crisis={Boolean(active?.crisis)}
+                  />
+                </>
+              )}
             </div>
           ))}
           {loading && (
-            <div className="bg-panel border border-panel-border rounded-lg px-4 py-3 text-sm text-muted max-w-[90%]">
-              Thinking.
+            <div className="bg-panel border border-panel-border rounded-lg px-4 py-3 max-w-[90%]">
+              <ThinkingIndicator crisis={Boolean(active?.crisis)} />
             </div>
           )}
           <div ref={bottomRef} />

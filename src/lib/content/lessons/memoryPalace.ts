@@ -24,7 +24,7 @@ export const MEMORY_PALACE_LESSON: Lesson = {
         "That gap is the entire technique. Your memory for places is enormous and effortless. Your memory for abstract lists is small and expensive. So you stop storing lists as lists, and start storing them as things sitting in a place.",
       ],
       illustration: {
-        src: "/lessons/memory-palace/hallway.png",
+        key: "hallway-route",
         alt: "A simple floor plan of an apartment hallway with numbered stopping points",
         caption: "A route you know without trying is a route you can store things in.",
       },
@@ -54,7 +54,7 @@ export const MEMORY_PALACE_LESSON: Lesson = {
         { at: "Window sill", image: "Thousands of stamps flutter in through the window like moths" },
       ],
       illustration: {
-        src: "/lessons/memory-palace/kitchen-route.png",
+        key: "kitchen-route",
         alt: "Kitchen floor plan with five numbered stops: door, kettle, fridge, sink, window sill",
         caption: "Five stops, one fixed order, always walked the same direction.",
       },

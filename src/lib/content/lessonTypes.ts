@@ -20,8 +20,12 @@
  */
 
 export type IllustrationSpec = {
-  /** File under /public/lessons/. Missing file falls back to the caption alone. */
-  src: string;
+  /**
+   * Key into the drawn SVG set (components/lesson/Illustrations). Not a file
+   * path: illustrations are drawn inline so there is no asset to license,
+   * host or lose, and they inherit theme tokens automatically.
+   */
+  key: string;
   alt: string;
   caption?: string;
 };

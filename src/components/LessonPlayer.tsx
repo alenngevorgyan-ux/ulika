@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import type { Lesson, LessonBlock } from "@/lib/content/lessonTypes";
 import { getBrowserSupabase } from "@/lib/supabase/client";
+import { ILLUSTRATIONS } from "@/components/lesson/Illustrations";
 
 /** Learner-supplied answers, keyed by storeAs. Persisted per lesson. */
 type Store = Record<string, string>;
@@ -445,12 +446,11 @@ function TimerBlock({ block }: { block: Extract<LessonBlock, { kind: "timer" }> 
   );
 }
 
-function Illustration({ spec }: { spec: { src: string; alt: string; caption?: string } }) {
-  const [failed, setFailed] = useState(false);
+function Illustration({ spec }: { spec: { key: string; alt: string; caption?: string } }) {
+  const Drawn = ILLUSTRATIONS[spec.key];
 
-  // Until the artwork exists, render the brief for it rather than a broken
-  // image. Doubles as the spec for whoever produces the asset.
-  if (failed) {
+  // An unknown key states what is missing rather than rendering a broken box.
+  if (!Drawn) {
     return (
       <figure className="my-6">
         <div className="border border-dashed border-panel-border rounded-lg p-6 text-center">
@@ -459,20 +459,18 @@ function Illustration({ spec }: { spec: { src: string; alt: string; caption?: st
           </p>
           <p className="text-xs text-muted leading-relaxed max-w-sm mx-auto">{spec.alt}</p>
         </div>
-        {spec.caption && <figcaption className="text-xs text-muted mt-2">{spec.caption}</figcaption>}
       </figure>
     );
   }
 
   return (
     <figure className="my-6">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={spec.src}
-        alt={spec.alt}
-        className="w-full rounded-lg border border-panel-border"
-        onError={() => setFailed(true)}
-      />
+      <div
+        className="rounded-lg border p-4"
+        style={{ background: "var(--panel)", borderColor: "var(--line)" }}
+      >
+        <Drawn />
+      </div>
       {spec.caption && <figcaption className="text-xs text-muted mt-2">{spec.caption}</figcaption>}
     </figure>
   );

@@ -126,7 +126,20 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      return NextResponse.json({ reply, configured: true, savedPlan, remembers: Boolean(memoryBlock), retrieval: routed.mode });
+      // Mode is inferred from what the reply actually contains rather than asked
+      // for separately: a reply that is mostly questions is still exploring.
+      const parsedForMode = reply.includes('"questions"') && !reply.includes('"checklist"')
+        ? "exploring"
+        : "advising";
+
+      return NextResponse.json({
+        reply,
+        configured: true,
+        savedPlan,
+        remembers: Boolean(memoryBlock),
+        retrieval: routed.mode,
+        mode: parsedForMode,
+      });
     }
 
     for (const call of message.tool_calls) {
