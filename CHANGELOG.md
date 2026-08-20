@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-08-21 (final) — Evidence highlight, reveal, hover
+
+Clicking an observation in /analyze selects the exact phrase in your pasted text
+and washes it brass. Quotes are marked solid (observed), readings dashed
+(concluded) — the same distinction the chat uses.
+
+Scroll reveal on long pages via IntersectionObserver. Elements start visible and
+hide only once the observer is confirmed working, so a browser without it leaves
+the page readable rather than blank.
+
+Card hover lifts and warms the border toward brass. No scale, no rotation, and
+disabled below 768px where there is no hover to respond to.
+
 ## 2026-08-21 (later) — Content expansion, planner UI, two silent bugs found
 
 ### Two real bugs, both found by verifying rather than assuming
