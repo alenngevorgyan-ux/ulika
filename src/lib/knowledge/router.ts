@@ -29,6 +29,8 @@ export interface RetrievedChunk {
   content: string;
   short_definition: string;
   depth: DepthLayer;
+  /** Stage craft. Must never be presented as real perception. */
+  craft_only?: boolean;
   similarity: number;
 }
 
@@ -100,7 +102,7 @@ function formatChunks(chunks: RetrievedChunk[]): string {
   return chunks
     .map(
       (c) =>
-        `${c.source_title} — ${c.chapter_title}${c.evidence_grade ? ` [evidence grade ${c.evidence_grade}]` : ""}\n${c.content}`
+        `${c.source_title} — ${c.chapter_title}${c.evidence_grade ? ` [evidence grade ${c.evidence_grade}]` : ""}${c.craft_only ? " [STAGE CRAFT — not a real ability]" : ""}\n${c.content}`
     )
     .join("\n\n");
 }

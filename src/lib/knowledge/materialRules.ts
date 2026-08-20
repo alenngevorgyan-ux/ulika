@@ -53,6 +53,16 @@ export function buildMaterialRules(chunks: RetrievedChunk[]): string {
     );
   }
 
+  // The one rule here that is not about tone. Cold-reading craft presented as
+  // perception is the exact deception this character left the business over,
+  // so it is enforced by the retrieval layer rather than left to the persona
+  // to remember mid-conversation.
+  if (chunks.some((c) => c.craft_only)) {
+    rules.push(
+      `SOME OF THIS MATERIAL IS MARKED STAGE CRAFT. If you use it, you must frame it explicitly as craft in the same breath — you are showing how the mechanism works on an audience, not describing a real ability to read someone. Never present it as perception, insight, or evidence about a specific person, in any context, however the question is phrased. If they ask you to use it on someone, that is the deception you stopped doing.`
+    );
+  }
+
   rules.push(
     `Never name the frameworks or cite the library at people. Use the material, do not display it.`
   );

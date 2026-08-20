@@ -63,3 +63,60 @@ create policy "owner reads own feedback"
 
 create index if not exists feedback_events_created_idx
   on public.feedback_events(created_at desc);
+
+
+-- ------------------------------------------------- per-chunk grading ---
+-- Some sources are internally heterogeneous. The 50-scenarios file puts a
+-- forcing trick that is arithmetic (certain) next to gaze-direction reading
+-- that barely beats chance. A single source-level grade would either launder
+-- the weak entries under the strong ones' credibility or bury the certain ones
+-- under the weak. So a chunk may override its source's grade.
+
+alter table public.knowledge_chunks
+  add column if not exists grade_override text
+    check (grade_override in ('A','B','C','D'));
+
+-- Stage craft that must NEVER be presented as real perception, whatever the
+-- conversation. Enforced at retrieval rather than trusted to the persona.
+alter table public.knowledge_chunks
+  add column if not exists craft_only boolean not null default false;
+
+create index if not exists knowledge_chunks_craft_idx
+  on public.knowledge_chunks(craft_only) where craft_only;
+
+
+-- Retrieval must surface the per-chunk grade and the craft flag, otherwise the
+-- rules layer has nothing to enforce against.
+drop function if exists public.match_knowledge_chunks(vector, text[], int, text[]);
+
+create or replace function public.match_knowledge_chunks(
+  p_embedding vector(768),
+  p_categories text[] default null,
+  p_limit int default 6,
+  p_depths text[] default null
+)
+returns table (
+  chunk_id uuid, source_id text, source_title text, category_id text,
+  evidence_grade text, chapter_title text, content text, short_definition text,
+  applicable_situations text[], depth text, craft_only boolean, similarity float
+)
+language sql stable
+as $$
+  select
+    c.id, s.id, s.title, s.category_id,
+    -- A chunk's own grade wins over its source's.
+    coalesce(c.grade_override, s.evidence_grade),
+    c.chapter_title, c.content, c.short_definition, c.applicable_situations,
+    c.depth::text, c.craft_only,
+    1 - (c.embedding <=> p_embedding)
+  from public.knowledge_chunks c
+  join public.knowledge_sources s on s.id = c.source_id
+  where c.embedding is not null
+    and (p_categories is null or s.category_id = any(p_categories))
+    and (p_depths is null or c.depth::text = any(p_depths))
+  order by c.embedding <=> p_embedding
+  limit p_limit;
+$$;
+
+grant execute on function public.match_knowledge_chunks(vector, text[], int, text[])
+  to anon, authenticated;
