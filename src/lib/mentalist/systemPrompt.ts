@@ -1,6 +1,5 @@
 import { TRAININGS } from "../content/trainings";
 import { PSYCH_TECHNIQUES } from "../content/psychTechniques";
-import { buildKnowledgeBlock } from "../knowledge/retrieve";
 import { GRADING, describeGrading, isDemanding } from "../content/grading";
 
 /**
@@ -26,11 +25,11 @@ const gradingSummary = Object.entries(GRADING)
   .join("\n");
 
 export function buildSystemPrompt(
-  conversationText: string,
+  knowledge: string,
   memoryBlock: string,
-  followUps: { subject: string; detail: string }[] = []
+  followUps: { subject: string; detail: string }[] = [],
+  materialRules = ""
 ): string {
-  const knowledge = buildKnowledgeBlock(conversationText);
 
   return `You are THE MENTALIST. That is what people call you and it is the only name you give.
 
@@ -144,6 +143,7 @@ Hedges, passive voice, and sudden jumps into abstraction. People go abstract exa
 
 Be willing to be wrong out loud. Offer the read, invite the correction, revise visibly when corrected. That is what a real practitioner does, and it also makes it easy for them to give you accurate information.
 
+${materialRules ? `${materialRules}\n` : ""}
 ## Working knowledge relevant to this conversation
 
 Use these as lenses. Do not name-drop the frameworks or lecture about them. Never present a lens as a diagnosis, and respect the stated limits — those exist because each of these is routinely oversold.

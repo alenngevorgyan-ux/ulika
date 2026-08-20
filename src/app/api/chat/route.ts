@@ -6,6 +6,8 @@ import { loadMemory, extractMemory, saveMemory, loadFollowUps, markRaised } from
 import { getServerSupabase } from "@/lib/supabase/server";
 import { detectCrisis } from "@/lib/safety/detector";
 import { buildCrisisReply } from "@/lib/safety/respond";
+import { routeKnowledge } from "@/lib/knowledge/router";
+import { buildMaterialRules } from "@/lib/knowledge/materialRules";
 
 export const maxDuration = 60;
 
@@ -83,8 +85,13 @@ export async function POST(req: NextRequest) {
   const followUps = isConversationStart ? await loadFollowUps(supabase, userId) : [];
   if (followUps.length) await markRaised(supabase, followUps.map((f) => f.id));
 
+  // Category router + vector search, falling back to cue matching over the TS
+  // notes while the library is unseeded. Either way the prompt gets a block.
+  const routed = await routeKnowledge(supabase, recentText, memoryBlock);
+  const materialRules = buildMaterialRules(routed.chunks);
+
   const conversation: AiMessage[] = [
-    { role: "system", content: buildSystemPrompt(recentText, memoryBlock, followUps) },
+    { role: "system", content: buildSystemPrompt(routed.block, memoryBlock, followUps, materialRules) },
     ...body.messages.map((m) => ({ role: m.role, content: m.content }) as AiMessage),
   ];
 
@@ -119,7 +126,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      return NextResponse.json({ reply, configured: true, savedPlan, remembers: Boolean(memoryBlock) });
+      return NextResponse.json({ reply, configured: true, savedPlan, remembers: Boolean(memoryBlock), retrieval: routed.mode });
     }
 
     for (const call of message.tool_calls) {
