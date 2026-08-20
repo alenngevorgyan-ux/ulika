@@ -3,6 +3,8 @@ import { TRAININGS } from "@/lib/content/trainings";
 import PlanList from "./PlanList";
 import SignInForm from "./SignInForm";
 import SignOutButton from "./SignOutButton";
+import TracksPanel from "./TracksPanel";
+import type { Track } from "@/lib/tracks";
 
 interface PlanItem {
   slug: string;
@@ -48,10 +50,16 @@ export default async function PlanPage() {
     );
   }
 
-  const { data: plans } = await supabase
-    .from("learning_plans")
-    .select("id, goal, items, created_at")
-    .order("created_at", { ascending: false });
+  const [{ data: plans }, { data: tracks }] = await Promise.all([
+    supabase
+      .from("learning_plans")
+      .select("id, goal, items, created_at")
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("user_tracks")
+      .select("id, track_id, label, started_at, target_pace, current_stage, last_reviewed_at")
+      .order("started_at", { ascending: true }),
+  ]);
 
   const trainingsBySlug = Object.fromEntries(TRAININGS.map((t) => [t.slug, t]));
 
@@ -61,7 +69,12 @@ export default async function PlanPage() {
         <h1 className="font-display text-3xl">My plan</h1>
         <SignOutButton />
       </div>
-      <p className="text-muted mb-10">Plans built around goals you named.</p>
+      <p className="text-muted mb-12">What you&apos;re running, and the plans built around it.</p>
+
+      <TracksPanel initial={(tracks ?? []) as Track[]} userId={user.id} />
+
+      <h2 className="font-display text-xl mb-2">Plans from the Mentalist</h2>
+      <p className="text-sm text-muted mb-6">Built around goals you named in conversation.</p>
 
       {!plans || plans.length === 0 ? (
         <p className="text-muted">
