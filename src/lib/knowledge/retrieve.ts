@@ -1,7 +1,8 @@
 import { CRAFT, type KnowledgeEntry } from "./craft";
 import { PSYCHOLOGY } from "./psychology";
+import { LEARNING } from "./learning";
 
-export const ALL_KNOWLEDGE: KnowledgeEntry[] = [...CRAFT, ...PSYCHOLOGY];
+export const ALL_KNOWLEDGE: KnowledgeEntry[] = [...CRAFT, ...PSYCHOLOGY, ...LEARNING];
 
 /**
  * Cue matching rather than embeddings, on purpose.

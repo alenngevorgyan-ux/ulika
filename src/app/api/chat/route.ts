@@ -4,6 +4,8 @@ import { buildSystemPrompt } from "@/lib/mentalist/systemPrompt";
 import { TOOL_DEFS, getTrainingCatalog, validatePlanArgs, type SavePlanArgs } from "@/lib/mentalist/tools";
 import { loadMemory, extractMemory, saveMemory, loadFollowUps, markRaised } from "@/lib/mentalist/memory";
 import { getServerSupabase } from "@/lib/supabase/server";
+import { detectCrisis } from "@/lib/safety/detector";
+import { buildCrisisReply } from "@/lib/safety/respond";
 
 export const maxDuration = 60;
 
@@ -47,6 +49,32 @@ export async function POST(req: NextRequest) {
     .map((m) => m.content)
     .join("\n");
 
+  // SAFETY LAYER — runs before anything else, on every single message.
+  // Deliberately not an instruction inside the main prompt: mid-conversation,
+  // deep in a discussion about a difficult relationship, is exactly where a
+  // quiet disclosure is easiest to absorb into the flow and miss. This layer
+  // has one job and no other context competing for it.
+  const lastUserMessage = [...body.messages].reverse().find((m) => m.role === "user");
+  const crisis = await detectCrisis(body.messages);
+
+  if (crisis.triggered && crisis.type) {
+    const reply = await buildCrisisReply(crisis.type, lastUserMessage?.content ?? "");
+
+    if (supabase && userId) {
+      try {
+        await supabase.from("crisis_flags").insert({
+          user_id: userId,
+          trigger_type: crisis.type,
+          session_context: crisis.evidence,
+        });
+      } catch {
+        /* logging must never block the handoff itself */
+      }
+    }
+
+    return NextResponse.json({ reply, configured: true, crisis: true });
+  }
+
   const memoryBlock = await loadMemory(supabase, userId);
 
   // Only surface unfinished business at the start of a conversation. Raising
@@ -85,9 +113,8 @@ export async function POST(req: NextRequest) {
       // container can freeze the moment the response goes out, and a write
       // that never lands is worse than one that costs 300ms.
       if (userId && supabase) {
-        const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
-        if (lastUser) {
-          const rows = await extractMemory(lastUser.content, reply);
+        if (lastUserMessage) {
+          const rows = await extractMemory(lastUserMessage.content, reply);
           await saveMemory(supabase, userId, rows);
         }
       }
