@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         reply:
-          "Марк пока молчит — ключ AI-провайдера (OPENROUTER_API_KEY) не настроен в этом окружении. Добавь его в переменные окружения, чтобы включить диалог.",
+          "No AI key configured in this environment (OPENROUTER_API_KEY). Set it to enable the conversation.",
         configured: false,
       },
       { status: 200 }
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
       const message = err instanceof Error ? err.message : "Unknown AI error";
       console.error("chat route AI error:", message);
       return NextResponse.json(
-        { reply: "Марк сейчас недоступен — попробуй ещё раз через минуту.", configured: true },
+        { reply: "Can't reach me right now. Try again in a minute.", configured: true },
         { status: 200 }
       );
     }
@@ -96,7 +96,7 @@ export async function POST(req: NextRequest) {
         } else if (!user || !supabase) {
           toolResult = {
             saved: false,
-            note: "Пользователь не авторизован — план показан, но не сохранён в аккаунте.",
+            note: "Not signed in, so the plan was shown but not saved to an account.",
           };
         } else {
           const { data, error } = await supabase
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
 
           if (error) {
             console.error("save_learning_plan insert error:", error.message);
-            toolResult = { saved: false, note: "Не удалось сохранить план — попробуй ещё раз." };
+            toolResult = { saved: false, note: "Could not save the plan. Try again." };
           } else {
             toolResult = { saved: true, plan: data };
             savedPlan = data;
@@ -131,7 +131,7 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({
-    reply: "Что-то пошло не так при сборке ответа — переформулируй запрос.",
+    reply: "Something went wrong building that answer. Rephrase and try again.",
     configured: true,
     savedPlan,
   });

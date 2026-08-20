@@ -51,7 +51,7 @@ export default function PlanList({
         <div key={plan.id} className="bg-panel border border-panel-border rounded-lg p-6">
           <h2 className="font-display text-lg mb-1">{plan.goal}</h2>
           <p className="text-xs text-muted mb-4">
-            {new Date(plan.created_at).toLocaleDateString("ru-RU")}
+            {new Date(plan.created_at).toLocaleDateString("en-US")}
           </p>
           <ol className="space-y-3">
             {[...plan.items]

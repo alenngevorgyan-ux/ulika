@@ -21,7 +21,7 @@ export default function SignInForm() {
   if (status === "sent") {
     return (
       <p className="text-sm text-muted">
-        Ссылка для входа отправлена на {email} — открой её на этом устройстве.
+        Sign-in link sent to {email}. Open it on this device.
       </p>
     );
   }
@@ -33,7 +33,7 @@ export default function SignInForm() {
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && send()}
-        placeholder="почта"
+        placeholder="email"
         className="flex-1 bg-panel border border-panel-border rounded-md px-4 py-2.5 text-sm outline-none focus:border-accent"
       />
       <button
@@ -41,10 +41,10 @@ export default function SignInForm() {
         disabled={status === "sending"}
         className="bg-accent text-background font-medium px-4 py-2.5 rounded-md text-sm hover:opacity-90 transition-opacity disabled:opacity-50"
       >
-        Войти
+        Sign in
       </button>
       {status === "error" && (
-        <p className="text-xs text-red-400 mt-2">Не получилось отправить ссылку — попробуй ещё раз.</p>
+        <p className="text-xs text-red-400 mt-2">Couldn&apos;t send the link. Try again.</p>
       )}
     </div>
   );

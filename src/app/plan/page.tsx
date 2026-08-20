@@ -24,10 +24,9 @@ export default async function PlanPage() {
   if (!supabase) {
     return (
       <div className="mx-auto max-w-2xl px-6 py-16">
-        <h1 className="font-display text-3xl mb-4">Мой план</h1>
+        <h1 className="font-display text-3xl mb-4">My plan</h1>
         <p className="text-muted">
-          Supabase ещё не подключён в этом окружении — планы, которые собирает Марк, пока не
-          сохраняются между сессиями. Как только появятся ключи проекта, планы будут доступны здесь.
+          Storage isn&apos;t configured in this environment, so plans won&apos;t persist between sessions yet.
         </p>
       </div>
     );
@@ -40,9 +39,9 @@ export default async function PlanPage() {
   if (!user) {
     return (
       <div className="mx-auto max-w-2xl px-6 py-16">
-        <h1 className="font-display text-3xl mb-4">Мой план</h1>
+        <h1 className="font-display text-3xl mb-4">My plan</h1>
         <p className="text-muted mb-6">
-          Войди по почте, чтобы видеть планы, которые собирает Марк, и сохранять новые.
+          Sign in by email to keep the plans the Mentalist builds for you.
         </p>
         <SignInForm />
       </div>
@@ -59,14 +58,14 @@ export default async function PlanPage() {
   return (
     <div className="mx-auto max-w-2xl px-6 py-16">
       <div className="flex items-baseline justify-between mb-2">
-        <h1 className="font-display text-3xl">Мой план</h1>
+        <h1 className="font-display text-3xl">My plan</h1>
         <SignOutButton />
       </div>
-      <p className="text-muted mb-10">Планы, которые собрал Марк по твоим целям.</p>
+      <p className="text-muted mb-10">Plans built around goals you named.</p>
 
       {!plans || plans.length === 0 ? (
         <p className="text-muted">
-          Пока нет ни одного плана — иди поговори с Марком о цели, и он соберёт первый.
+          Nothing here yet. Tell the Mentalist what you&apos;re after and he&apos;ll build the first one.
         </p>
       ) : (
         <PlanList plans={plans as PlanRow[]} trainingsBySlug={trainingsBySlug} />

@@ -21,15 +21,15 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "УЛИКА — наблюдательность, память, ясность ума",
+  title: "ULIKA — attention, memory, reading people",
   description:
-    "Тренировки внимания, памяти и устного счёта плюс AI-наставник Марк Холодов, который собирает персональный план под твою цель.",
+    "Interactive training in observation, memory and mental calculation, with a mentor who builds a plan around your goal.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
-      lang="ru"
+      lang="en"
       className={`${displayFont.variable} ${plexSans.variable} ${plexMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
