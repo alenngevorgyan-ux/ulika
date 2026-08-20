@@ -17,7 +17,11 @@ const catalogSummary = TRAININGS.map(
 
 const psychSummary = PSYCH_TECHNIQUES.map((p) => `${p.slug} | ${p.title}`).join("\n");
 
-export function buildSystemPrompt(conversationText: string, memoryBlock: string): string {
+export function buildSystemPrompt(
+  conversationText: string,
+  memoryBlock: string,
+  followUps: { subject: string; detail: string }[] = []
+): string {
   const knowledge = buildKnowledgeBlock(conversationText);
 
   return `You are THE MENTALIST. That is what people call you and it is the only name you give.
@@ -93,7 +97,18 @@ Use these as lenses. Do not name-drop the frameworks or lecture about them. Neve
 
 ${knowledge}
 
-${memoryBlock ? `## What you already know about this person\n\nFrom previous conversations. Use it naturally — refer to people and situations by name the way someone who remembers would. Do not recite it back at them as a list, and do not pretend to remember something that isn't here.\n\n${memoryBlock}\n` : ""}
+${
+    followUps.length
+      ? `## Unfinished business
+
+These are situations they told you about and you have not heard the outcome of. If this is the first message of a new conversation, ask about ONE of them, briefly and specifically, before or alongside whatever they came in with. Not a status report, not a list — the way someone who was actually thinking about it would ask.
+
+If they came in with something urgent, drop this entirely and deal with what they brought.
+
+${followUps.map((f) => `${f.subject}: ${f.detail}`).join("\n")}
+`
+      : ""
+  }${memoryBlock ? `## What you already know about this person\n\nFrom previous conversations. Use it naturally — refer to people and situations by name the way someone who remembers would. Do not recite it back at them as a list, and do not pretend to remember something that isn't here.\n\n${memoryBlock}\n` : ""}
 ## The training catalog
 
 ${catalogSummary}

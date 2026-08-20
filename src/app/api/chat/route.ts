@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { chatComplete, isAiConfigured, type AiMessage } from "@/lib/ai/provider";
 import { buildSystemPrompt } from "@/lib/mentalist/systemPrompt";
 import { TOOL_DEFS, getTrainingCatalog, validatePlanArgs, type SavePlanArgs } from "@/lib/mentalist/tools";
-import { loadMemory, extractMemory, saveMemory } from "@/lib/mentalist/memory";
+import { loadMemory, extractMemory, saveMemory, loadFollowUps, markRaised } from "@/lib/mentalist/memory";
 import { getServerSupabase } from "@/lib/supabase/server";
 
 export const maxDuration = 60;
@@ -49,8 +49,14 @@ export async function POST(req: NextRequest) {
 
   const memoryBlock = await loadMemory(supabase, userId);
 
+  // Only surface unfinished business at the start of a conversation. Raising
+  // it mid-thread would derail whatever they're actually working through.
+  const isConversationStart = body.messages.filter((m) => m.role === "user").length === 1;
+  const followUps = isConversationStart ? await loadFollowUps(supabase, userId) : [];
+  if (followUps.length) await markRaised(supabase, followUps.map((f) => f.id));
+
   const conversation: AiMessage[] = [
-    { role: "system", content: buildSystemPrompt(recentText, memoryBlock) },
+    { role: "system", content: buildSystemPrompt(recentText, memoryBlock, followUps) },
     ...body.messages.map((m) => ({ role: m.role, content: m.content }) as AiMessage),
   ];
 

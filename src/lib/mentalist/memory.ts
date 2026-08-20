@@ -8,6 +8,54 @@ export interface MemoryRow {
   confidence: "stated" | "inferred";
 }
 
+/** A situation goes stale after this long with no mention. */
+const FOLLOW_UP_AFTER_HOURS = 20;
+
+/**
+ * Open situations he hasn't asked about recently.
+ *
+ * This is what turns a chat window into something that keeps track of you: he
+ * opens by asking how the thing with your sister went, rather than greeting a
+ * stranger. Deliberately conservative — one or two, never a status meeting.
+ */
+export async function loadFollowUps(
+  supabase: SupabaseClient | null,
+  userId: string | null
+): Promise<{ subject: string; detail: string; id: string }[]> {
+  if (!supabase || !userId) return [];
+
+  const cutoff = new Date(Date.now() - FOLLOW_UP_AFTER_HOURS * 3600 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from("mentalist_memory")
+    .select("id, subject, detail, last_raised_at, updated_at")
+    .eq("kind", "situation")
+    .eq("status", "open")
+    .lt("updated_at", cutoff)
+    .or(`last_raised_at.is.null,last_raised_at.lt.${cutoff}`)
+    .order("updated_at", { ascending: false })
+    .limit(2);
+
+  if (error || !data) return [];
+  return data.map((r) => ({ id: r.id, subject: r.subject, detail: r.detail }));
+}
+
+/** Stamp so he doesn't ask about the same thing every single session. */
+export async function markRaised(
+  supabase: SupabaseClient | null,
+  ids: string[]
+): Promise<void> {
+  if (!supabase || ids.length === 0) return;
+  try {
+    await supabase
+      .from("mentalist_memory")
+      .update({ last_raised_at: new Date().toISOString() })
+      .in("id", ids);
+  } catch {
+    /* non-critical */
+  }
+}
+
 /**
  * Load everything we know about this user and format it for the prompt.
  *

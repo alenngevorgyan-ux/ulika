@@ -20,9 +20,19 @@ create table if not exists public.mentalist_memory (
   detail text not null,           -- the actual content
   confidence text not null default 'stated'
     check (confidence in ('stated','inferred')),
+  -- Follow-up state. Situations are the only kind that can be open or closed;
+  -- a person or a stable fact has no outcome to come back to.
+  status text not null default 'open' check (status in ('open','closed')),
+  last_raised_at timestamptz,     -- when he last asked how it went
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Safe to re-run on an existing install.
+alter table public.mentalist_memory
+  add column if not exists status text not null default 'open';
+alter table public.mentalist_memory
+  add column if not exists last_raised_at timestamptz;
 
 alter table public.mentalist_memory enable row level security;
 
