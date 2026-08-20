@@ -3,6 +3,24 @@ import { chatComplete } from "../ai/provider";
 import { embedOne } from "./embed";
 import { buildKnowledgeBlock } from "./retrieve";
 
+export type DepthLayer = "core" | "deepening" | "mastery";
+
+/**
+ * Which layers to retrieve, given how much time the learner actually has.
+ *
+ * Same content in the database, different traversal speed. A fortnight gets
+ * CORE across many topics; a month unfolds all three on each.
+ */
+export function depthsForPace(
+  pace: "intense" | "steady" | "light" | "paused" | undefined,
+  daysRemaining?: number
+): DepthLayer[] {
+  if (typeof daysRemaining === "number" && daysRemaining <= 14) return ["core"];
+  if (pace === "light" || pace === "paused") return ["core"];
+  if (pace === "intense") return ["core", "deepening", "mastery"];
+  return ["core", "deepening"];
+}
+
 export interface RetrievedChunk {
   source_title: string;
   category_id: string;
@@ -10,6 +28,7 @@ export interface RetrievedChunk {
   chapter_title: string;
   content: string;
   short_definition: string;
+  depth: DepthLayer;
   similarity: number;
 }
 
@@ -95,7 +114,8 @@ function formatChunks(chunks: RetrievedChunk[]): string {
 export async function routeKnowledge(
   supabase: SupabaseClient | null,
   message: string,
-  memoryContext = ""
+  memoryContext = "",
+  depths?: DepthLayer[]
 ): Promise<RoutedKnowledge> {
   const cueFallback = (): RoutedKnowledge => ({
     categories: [],
@@ -110,11 +130,26 @@ export async function routeKnowledge(
     const categories = await pickCategories(message, memoryContext);
     const embedding = await embedOne(message);
 
-    const { data, error } = await supabase.rpc("match_knowledge_chunks", {
+    // The depth parameter only exists after migration_sources_depth.sql. Until
+    // it is applied, passing it makes PostgREST fail to resolve the function
+    // at all, which would silently drop live search back to keyword matching.
+    // So: try the four-arg form, and fall back to the three-arg one on a
+    // signature error rather than losing vector retrieval entirely.
+    let { data, error } = await supabase.rpc("match_knowledge_chunks", {
       p_embedding: embedding,
       p_categories: categories,
       p_limit: 8,
+      // null means every layer — conversation is not paced the way a track is.
+      p_depths: depths ?? null,
     });
+
+    if (error) {
+      ({ data, error } = await supabase.rpc("match_knowledge_chunks", {
+        p_embedding: embedding,
+        p_categories: categories,
+        p_limit: 8,
+      }));
+    }
 
     if (error || !data || data.length === 0) return cueFallback();
 
