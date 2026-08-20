@@ -41,6 +41,27 @@ previously rendered a "pending" box are now inline SVG floor plans with the
 route dashed through numbered stops. No stock imagery, no generated raster with
 unclear provenance. They read theme tokens, so they cannot drift out of palette.
 
+**Block 6 — planner as its own call.** `src/lib/planner/build.ts` plus
+`/api/plan`. Takes the dossier, active tracks, retrieved chunks and the stated
+pace/horizon; returns stages with a track, a depth layer and a day count. Stages
+pointing at slugs that do not exist are dropped, because a plan that sends you
+to a 404 is worse than a shorter plan. Depth layers are constrained by the
+horizon — a fortnight gets core only.
+
+Every plan carries a `caveat` naming its own honest weakness, and the model is
+told never to make it reassuring. A real one from testing: "builds comfort in
+low-stakes rehearsals but does not cover salary research, market benchmarking,
+or how you'll hold up in an actual high-stakes conversation."
+
+Dossier → suggested tracks is on the same route (GET). Rate-limited to once a
+fortnight, skips anything already running, and the matcher is told to return
+nothing far more often than it matches — an adjacent method is a wrong
+recommendation dressed as insight, and it costs more trust than it gains.
+
+Verified: two goals at different horizons produced 4 stages each, 0 invalid
+slugs, day counts summing exactly to the horizon, and depth correctly limited
+to core at 14 days while allowing deepening at 45.
+
 ### Verified by measurement, not assumption
 
 **Crisis mode downgrade (Block 8 requirement + Block 10).** With the detector
@@ -67,27 +88,6 @@ fabricated quotes surviving a check against the source text.
 
 Nothing in this batch — no new written content was generated. The 12-direction
 content expansion (Block 3) was not started, so there is no prose to proofread.
-
-**Block 6 — planner as its own call.** `src/lib/planner/build.ts` plus
-`/api/plan`. Takes the dossier, active tracks, retrieved chunks and the stated
-pace/horizon; returns stages with a track, a depth layer and a day count. Stages
-pointing at slugs that do not exist are dropped, because a plan that sends you
-to a 404 is worse than a shorter plan. Depth layers are constrained by the
-horizon — a fortnight gets core only.
-
-Every plan carries a `caveat` naming its own honest weakness, and the model is
-told never to make it reassuring. A real one from testing: "builds comfort in
-low-stakes rehearsals but does not cover salary research, market benchmarking,
-or how you'll hold up in an actual high-stakes conversation."
-
-Dossier → suggested tracks is on the same route (GET). Rate-limited to once a
-fortnight, skips anything already running, and the matcher is told to return
-nothing far more often than it matches — an adjacent method is a wrong
-recommendation dressed as insight, and it costs more trust than it gains.
-
-Verified: two goals at different horizons produced 4 stages each, 0 invalid
-slugs, day counts summing exactly to the horizon, and depth correctly limited
-to core at 14 days while allowing deepening at 45.
 
 ### Deliberately not in this batch
 
