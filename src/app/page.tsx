@@ -79,7 +79,7 @@ export default function Home() {
             <Link
               key={track.id}
               href="/train"
-              className="bg-panel border border-panel-border rounded-lg p-6 hover:border-accent transition-colors"
+              className="card-hover bg-panel border border-panel-border rounded-lg p-6"
             >
               <h3 className="font-display text-lg mb-2">{track.title}</h3>
               <p className="text-sm text-muted leading-relaxed">{track.blurb}</p>
@@ -118,7 +118,7 @@ function Card({ href, title, body }: { href: string; title: string; body: string
   return (
     <Link
       href={href}
-      className="bg-panel border border-panel-border rounded-lg p-6 hover:border-accent transition-colors"
+      className="card-hover bg-panel border border-panel-border rounded-lg p-6"
     >
       <h3 className="font-display text-lg mb-2">{title}</h3>
       <p className="text-sm text-muted leading-relaxed">{body}</p>

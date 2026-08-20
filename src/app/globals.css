@@ -215,6 +215,30 @@ body > * {
   align-items: center;
 }
 
+/* Card hover: a lift and a border warming toward brass. No scale, no rotation —
+   those read as playful, and this is meant to read as precise. */
+.card-hover {
+  transition:
+    border-color var(--dur-micro) var(--ease-expo-out),
+    box-shadow var(--dur-micro) var(--ease-expo-out),
+    transform var(--dur-micro) var(--ease-expo-out);
+}
+
+.card-hover:hover {
+  border-color: color-mix(in srgb, var(--accent-brass) 45%, var(--line));
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.55);
+  transform: translateY(-1px);
+}
+
+@media (max-width: 768px) {
+  /* No lift on touch: there is no hover, and the transform just causes
+     repaints during scroll. */
+  .card-hover:hover {
+    transform: none;
+    box-shadow: none;
+  }
+}
+
 /* ------------------------------------------------- reduced motion --- */
 
 @media (prefers-reduced-motion: reduce) {

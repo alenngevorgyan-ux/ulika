@@ -28,8 +28,8 @@ export default function TrainPage() {
                   const ready = hasLesson(t.slug);
                   const card = (
                     <div
-                      className={`h-full bg-panel border rounded-lg p-5 transition-colors ${
-                        ready ? "border-accent/40 hover:border-accent" : "border-panel-border"
+                      className={`h-full card-hover bg-panel border rounded-lg p-5 ${
+                        ready ? "border-accent/40 card-hover" : "border-panel-border"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3 mb-2">

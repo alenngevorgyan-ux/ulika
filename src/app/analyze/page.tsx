@@ -18,6 +18,30 @@ interface Result {
   droppedQuotes: number;
 }
 
+/**
+ * Scroll to the quoted phrase in the source text and flash it.
+ *
+ * The offset is found by searching the textarea's own value rather than being
+ * carried from the server: the API already verifies every quote literally
+ * appears in the submitted text, so the string is guaranteed findable and a
+ * separate offset field would be a second thing to keep in sync for no gain.
+ */
+function jumpToQuote(quote: string) {
+  const el = document.getElementById("analyze-source") as HTMLTextAreaElement | null;
+  if (!el) return;
+  const idx = el.value.toLowerCase().indexOf(quote.toLowerCase().slice(0, 40));
+  if (idx === -1) return;
+
+  el.focus({ preventScroll: true });
+  el.setSelectionRange(idx, idx + quote.length);
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  // Brass wash over the whole field, not a yellow marker — the selection
+  // itself shows the phrase, this just draws the eye back up to it.
+  el.classList.add("ulika-evidence-flash");
+  setTimeout(() => el.classList.remove("ulika-evidence-flash"), 1700);
+}
+
 export default function AnalyzePage() {
   const [text, setText] = useState("");
   const [context, setContext] = useState("");
@@ -70,6 +94,7 @@ export default function AnalyzePage() {
         <div>
           <label className="block text-xs text-muted mb-1.5">The conversation</label>
           <textarea
+            id="analyze-source"
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={12}
@@ -98,7 +123,12 @@ export default function AnalyzePage() {
               </p>
               <div className="space-y-4">
                 {result.lines.map((l, i) => (
-                  <div key={i} className="border-l-2 border-panel-border pl-4">
+                  <div
+                    key={i}
+                    onClick={() => jumpToQuote(l.quote)}
+                    className="border-l-2 border-panel-border pl-4 cursor-pointer hover:border-accent transition-colors"
+                    title="Show me where in the text"
+                  >
                     <div className="flex items-center gap-2 mb-1.5">
                       <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
                         {l.who === "you" ? "you" : "them"}
@@ -109,8 +139,12 @@ export default function AnalyzePage() {
                         </span>
                       )}
                     </div>
-                    <p className="text-sm mb-1.5 text-foreground/70 italic">&ldquo;{l.quote}&rdquo;</p>
-                    <p className="text-sm leading-relaxed">{l.reading}</p>
+                    <p className="text-sm mb-1.5 text-foreground/70 italic mark-fact">
+                      &ldquo;{l.quote}&rdquo;
+                    </p>
+                    {/* The quote is observed; the reading is concluded. Marked
+                        differently so the difference is visible, not asserted. */}
+                    <p className="text-sm leading-relaxed mark-inference">{l.reading}</p>
                   </div>
                 ))}
               </div>
