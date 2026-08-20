@@ -41,14 +41,17 @@ export interface RoutedKnowledge {
   block: string;
 }
 
-const CATEGORY_IDS = ["craft", "psychology", "learning"] as const;
+const CATEGORY_IDS = ["craft", "psychology", "learning", "stoicism", "mindfulness", "emotion"] as const;
 
 const ROUTER_PROMPT = `You route a question to the right shelf of a reference library. You output JSON only.
 
 The shelves:
 craft - reading people: observation, what wording gives away, cold reading, attention, groups, being wrong well.
-psychology - relationships, conflict, decisions, motivation, habits, emotion, influence, boundaries.
+psychology - relationships, conflict, decisions, habits, influence, attachment, communication.
 learning - acquiring any skill: memory, practice, feedback, scheduling, plateaus.
+stoicism - control, acceptance, fear of loss, duty and role, perspective on humiliation.
+mindfulness - attention, rumination, forcing versus flowing, meditation practice itself.
+emotion - naming feelings, self-criticism, self-worth, people-pleasing, motivation, meaning, flow, performance.
 
 Return exactly: {"categories": ["..."]}
 

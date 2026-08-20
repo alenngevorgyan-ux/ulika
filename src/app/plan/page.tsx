@@ -4,6 +4,7 @@ import PlanList from "./PlanList";
 import SignInForm from "./SignInForm";
 import SignOutButton from "./SignOutButton";
 import TracksPanel from "./TracksPanel";
+import PlanBuilder from "./PlanBuilder";
 import type { Track } from "@/lib/tracks";
 
 interface PlanItem {
@@ -70,6 +71,8 @@ export default async function PlanPage() {
         <SignOutButton />
       </div>
       <p className="text-muted mb-12">What you&apos;re running, and the plans built around it.</p>
+
+      <PlanBuilder userId={user.id} />
 
       <TracksPanel initial={(tracks ?? []) as Track[]} userId={user.id} />
 

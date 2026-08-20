@@ -14,6 +14,9 @@ import { createClient } from "@supabase/supabase-js";
 import { CRAFT, type KnowledgeEntry } from "../src/lib/knowledge/craft";
 import { PSYCHOLOGY } from "../src/lib/knowledge/psychology";
 import { LEARNING } from "../src/lib/knowledge/learning";
+import { STOICISM } from "../src/lib/knowledge/stoicism";
+import { MINDFULNESS } from "../src/lib/knowledge/mindfulness";
+import { EMOTION } from "../src/lib/knowledge/emotion";
 import { GRADING } from "../src/lib/content/grading";
 import { embed } from "../src/lib/knowledge/embed";
 
@@ -41,29 +44,68 @@ const CATEGORIES = [
     sort_order: 3,
     entries: LEARNING,
   },
+  {
+    id: "stoicism",
+    name: "Stoicism and ancient philosophy",
+    description: "Control, acceptance, duty, and perspective on what cannot be changed.",
+    sort_order: 4,
+    entries: STOICISM,
+  },
+  {
+    id: "mindfulness",
+    name: "Attention and mindfulness",
+    description: "Rumination, forcing versus flowing, and what meditation research actually shows.",
+    sort_order: 5,
+    entries: MINDFULNESS,
+  },
+  {
+    id: "emotion",
+    name: "Emotion, self-worth and performance",
+    description: "Naming feelings, self-criticism, boundaries, motivation, meaning and flow.",
+    sort_order: 6,
+    entries: EMOTION,
+  },
 ];
 
-/** The four parts of a note, as separate retrievable thoughts. */
+/**
+ * The four parts of a note, as separate retrievable thoughts, each carrying its
+ * depth layer.
+ *
+ * Depth is assigned HERE rather than by a migration UPDATE. It was originally a
+ * one-off UPDATE keyed on chapter_title, which worked exactly once: this script
+ * deletes and reinserts chunks on every run, so the next ingest silently reset
+ * all 184 rows to the column default and quietly disabled the whole depth
+ * feature. Anything derived from chunk content has to be produced by the thing
+ * that writes the chunks.
+ *
+ *   mechanism + how to use it -> core       (the idea and one practice)
+ *   what it reveals           -> deepening  (context, what it surfaces)
+ *   where it fails            -> mastery    (edge cases, misapplication)
+ */
 function chunksFor(entry: KnowledgeEntry) {
   return [
     {
       chapter_title: "Mechanism",
       content: entry.core,
+      depth: "core" as const,
       short_definition: `How ${entry.title.toLowerCase()} works.`,
-    },
-    {
-      chapter_title: "What it lets you see",
-      content: entry.reveals,
-      short_definition: `What ${entry.title.toLowerCase()} makes visible that is otherwise missed.`,
     },
     {
       chapter_title: "Using it",
       content: entry.inPractice,
+      depth: "core" as const,
       short_definition: `How to actually apply ${entry.title.toLowerCase()} in a real conversation.`,
+    },
+    {
+      chapter_title: "What it lets you see",
+      content: entry.reveals,
+      depth: "deepening" as const,
+      short_definition: `What ${entry.title.toLowerCase()} makes visible that is otherwise missed.`,
     },
     {
       chapter_title: "Where it fails",
       content: entry.limits,
+      depth: "mastery" as const,
       // This chunk exists so the limits can be retrieved INDEPENDENTLY of the
       // claim. A model that finds the mechanism must be able to find the
       // caveat too, or the library becomes a confident-sounding liability.
@@ -144,6 +186,7 @@ async function main() {
           content: p.content,
           short_definition: p.short_definition,
           applicable_situations: entry.cues,
+          depth: p.depth,
           embedding: vectors[i],
         }));
         const { error } = await supabase.from("knowledge_chunks").insert(rows);

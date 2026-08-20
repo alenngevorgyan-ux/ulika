@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## 2026-08-21 (later) — Content expansion, planner UI, two silent bugs found
+
+### Two real bugs, both found by verifying rather than assuming
+
+**Evidence grades were null for the entire original library.** The GRADING map
+was keyed on catalog slugs; the RAG library uses different entry ids. 29 of 46
+sources came back ungraded, and `buildMaterialRules` falls through to "D" when
+it sees no grades — so the model was being told "the best material available is
+only grade D, say so out loud" on every single conversation. Silent, live, and
+exactly backwards. All 46 now graded; distribution is 10 A, 12 B, 19 C, 5 D.
+
+**Depth layers were being wiped on every re-ingest.** They were assigned by a
+one-off UPDATE in the migration, but the ingest deletes and reinserts chunks, so
+the next run reset all 184 rows to the column default and quietly disabled the
+whole depth feature. Moved into the ingest itself, where anything derived from
+chunk content belongs. Verified: 92 core / 46 deepening / 46 mastery.
+
+### Content
+
+Library grew 29 → 46 sources, 116 → 184 chunks, 3 → 6 shelves. New: stoicism
+and ancient philosophy (5), attention and mindfulness (4), and emotion,
+self-worth and performance (8). Written from scratch, each with its failure
+mode, and graded harder than their public reputation — wu wei is D and called
+the most-abused idea on its shelf; grit is C with the meta-analysis noted;
+emotional intelligence is C because the questionnaires used in workplace
+training add little beyond personality.
+
+Verified retrieval on five situational queries across the new shelves: rumination
+routes to mindfulness+emotion, people-pleasing to self-worth, "can't stop pushing
+on a project that isn't working" to the grit note's *failure mode* chunk
+specifically.
+
+### Planner UI
+
+/plan now builds and renders plans, and shows the dossier suggestion card when
+one is due. The caveat is displayed under its own heading — "what this plan does
+not do" — rather than buried, because a plan that hides its weakness is a sales
+pitch.
+
+### Safety re-verified after all of it
+
+All four crisis cases unchanged. Retrieval reports "vector" on the non-crisis
+paths and crisis replies still bypass the model entirely.
+
 ## 2026-08-21 — Design system, structured chat, drawn illustrations
 
 Branch: `staging` (not merged to `main`, not on ulika.vercel.app yet).
