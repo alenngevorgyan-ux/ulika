@@ -11,6 +11,11 @@
 --   pattern   - something recurring about how the user operates
 --   goal      - what they said they want
 --   fact      - stable biographical detail (job, city, family shape)
+--
+-- Safe to run more than once: every statement is guarded, and policies are
+-- dropped before being recreated, so a half-finished run can just be re-run.
+
+-- ---------------------------------------------------------------- memory ---
 
 create table if not exists public.mentalist_memory (
   id uuid primary key default gen_random_uuid(),
@@ -28,7 +33,6 @@ create table if not exists public.mentalist_memory (
   updated_at timestamptz not null default now()
 );
 
--- Safe to re-run on an existing install.
 alter table public.mentalist_memory
   add column if not exists status text not null default 'open';
 alter table public.mentalist_memory
@@ -36,13 +40,20 @@ alter table public.mentalist_memory
 
 alter table public.mentalist_memory enable row level security;
 
+drop policy if exists "owner reads own memory" on public.mentalist_memory;
 create policy "owner reads own memory"
   on public.mentalist_memory for select using (auth.uid() = user_id);
+
+drop policy if exists "owner writes own memory" on public.mentalist_memory;
 create policy "owner writes own memory"
   on public.mentalist_memory for insert with check (auth.uid() = user_id);
+
+drop policy if exists "owner updates own memory" on public.mentalist_memory;
 create policy "owner updates own memory"
   on public.mentalist_memory for update using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+drop policy if exists "owner deletes own memory" on public.mentalist_memory;
 create policy "owner deletes own memory"
   on public.mentalist_memory for delete using (auth.uid() = user_id);
 
@@ -54,9 +65,10 @@ create index if not exists mentalist_memory_user_idx
 create unique index if not exists mentalist_memory_unique_subject
   on public.mentalist_memory(user_id, kind, lower(subject));
 
+-- --------------------------------------------------------- conversations ---
+-- History follows the account rather than the browser. localStorage stays as
+-- the guest-mode path.
 
--- Conversations move server-side so history follows the account, not the
--- browser. localStorage stays as the guest-mode path.
 create table if not exists public.mentalist_conversations (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -68,13 +80,20 @@ create table if not exists public.mentalist_conversations (
 
 alter table public.mentalist_conversations enable row level security;
 
+drop policy if exists "owner reads own conversations" on public.mentalist_conversations;
 create policy "owner reads own conversations"
   on public.mentalist_conversations for select using (auth.uid() = user_id);
+
+drop policy if exists "owner writes own conversations" on public.mentalist_conversations;
 create policy "owner writes own conversations"
   on public.mentalist_conversations for insert with check (auth.uid() = user_id);
+
+drop policy if exists "owner updates own conversations" on public.mentalist_conversations;
 create policy "owner updates own conversations"
   on public.mentalist_conversations for update using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+drop policy if exists "owner deletes own conversations" on public.mentalist_conversations;
 create policy "owner deletes own conversations"
   on public.mentalist_conversations for delete using (auth.uid() = user_id);
 
