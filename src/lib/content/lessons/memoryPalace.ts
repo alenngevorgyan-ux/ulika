@@ -170,6 +170,16 @@ export const MEMORY_PALACE_LESSON: Lesson = {
         "Slower than forwards is expected. Impossible backwards means the images are living in a chain, each one pulling the next, rather than nailed to their own spot. Fix: revisit the weak stop and make the image physically interact with that exact object.",
     },
     {
+      kind: "response",
+      title: "What actually happened",
+      body: [
+        "Before we go on, write down how that went. Not how it was supposed to go.",
+      ],
+      prompt:
+        "Which images held and which fell apart, and what was different about the ones that failed?",
+      minWords: 8,
+    },
+    {
       kind: "quiz",
       title: "Diagnose the failure",
       question:
@@ -236,6 +246,16 @@ export const MEMORY_PALACE_LESSON: Lesson = {
         "The images that survived were the ones with motion, wrong scale, or physical sensation. That's your personal evidence, from your own head, not a claim from a book.",
         "Everything else in memory work is a variation on what you just did. Numbers, names, faces, speeches — same machine, different cargo.",
       ],
+    },
+    {
+      kind: "response",
+      title: "One last thing, then you're done",
+      body: [
+        "Write this from memory, without scrolling back. That is the point of asking.",
+      ],
+      prompt:
+        "Explain the method to someone who has never heard of it, in your own words, in about three sentences.",
+      minWords: 15,
     },
   ],
 };

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import type { Lesson, LessonBlock } from "@/lib/content/lessonTypes";
+import { getBrowserSupabase } from "@/lib/supabase/client";
 
 /** Learner-supplied answers, keyed by storeAs. Persisted per lesson. */
 type Store = Record<string, string>;
@@ -38,11 +39,37 @@ function useStore(lessonSlug: string) {
   return { store, set };
 }
 
+/**
+ * Persist a written answer. Fire-and-forget is acceptable here (unlike memory
+ * extraction in the API route) because this runs in the browser, not in a
+ * serverless container that can freeze the moment a response ships.
+ */
+async function saveResponse(skillId: string, prompt: string, response: string) {
+  const text = response.trim();
+  if (!text) return;
+  const supabase = getBrowserSupabase();
+  if (!supabase) return;
+  const { data } = await supabase.auth.getUser();
+  if (!data.user) return;
+  await supabase.from("training_responses").insert({
+    user_id: data.user.id,
+    skill_id: skillId,
+    prompt,
+    response: text,
+  });
+}
+
 export default function LessonPlayer({ lesson }: { lesson: Lesson }) {
   const [index, setIndex] = useState(0);
   const { store, set } = useStore(lesson.slug);
   const block = lesson.blocks[index];
   const isLast = index === lesson.blocks.length - 1;
+
+  // The one place progress is blocked. Everything else is skippable by design;
+  // retrieval practice is the mechanism, so skipping it is skipping the lesson.
+  const responseKey = block.kind === "response" ? `response-${index}` : null;
+  const written = responseKey ? (store[responseKey] ?? "").trim().split(/\s+/).filter(Boolean).length : 0;
+  const gated = block.kind === "response" && written < block.minWords;
   const topRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -69,7 +96,7 @@ export default function LessonPlayer({ lesson }: { lesson: Lesson }) {
         />
       </div>
 
-      <BlockView key={index} block={block} store={store} set={set} />
+      <BlockView key={index} block={block} store={store} set={set} storeKey={`response-${index}`} />
 
       <div className="flex gap-3 mt-10 pt-6 border-t border-panel-border">
         {index > 0 && (
@@ -82,8 +109,14 @@ export default function LessonPlayer({ lesson }: { lesson: Lesson }) {
         )}
         {!isLast ? (
           <button
-            onClick={() => setIndex((i) => i + 1)}
-            className="bg-accent text-background font-medium px-6 py-2.5 rounded-md text-sm hover:opacity-90 transition-opacity"
+            onClick={() => {
+              if (responseKey) {
+                void saveResponse(lesson.trainingSlug, (block as { prompt: string }).prompt, store[responseKey] ?? "");
+              }
+              setIndex((i) => i + 1);
+            }}
+            disabled={gated}
+            className="bg-accent text-background font-medium px-6 py-2.5 rounded-md text-sm hover:opacity-90 transition-opacity disabled:opacity-40"
           >
             Continue
           </button>
@@ -104,10 +137,12 @@ function BlockView({
   block,
   store,
   set,
+  storeKey,
 }: {
   block: LessonBlock;
   store: Store;
   set: (k: string, v: string) => void;
+  storeKey: string;
 }) {
   switch (block.kind) {
     case "concept":
@@ -174,6 +209,27 @@ function BlockView({
 
     case "timer":
       return <TimerBlock block={block} />;
+
+    case "response":
+      return (
+        <section>
+          <Label>Write it down</Label>
+          <H>{block.title}</H>
+          <Body paragraphs={block.body} />
+          <p className="text-sm leading-relaxed mt-6 mb-3">{block.prompt}</p>
+          <textarea
+            value={store[storeKey] ?? ""}
+            onChange={(e) => set(storeKey, e.target.value)}
+            rows={5}
+            placeholder="In your own words. Nobody else reads this."
+            className="w-full bg-panel border border-panel-border rounded-md px-4 py-3 text-sm outline-none focus:border-accent resize-none"
+          />
+          <p className="text-xs text-muted mt-2 leading-relaxed">
+            Writing this from memory does more than re-reading the lesson would. It is also what
+            decides whether the next step goes deeper or repeats this one differently.
+          </p>
+        </section>
+      );
 
     case "field":
       return (

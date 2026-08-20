@@ -84,6 +84,16 @@ export type LessonBlock =
       afterword: string;
     }
   | {
+      // Retrieval practice, and the only gated block: you cannot continue
+      // without writing something. Writing an answer beats re-reading, and it
+      // is also what the adaptive review reads to decide what comes next.
+      kind: "response";
+      title: string;
+      body: string[];
+      prompt: string;
+      minWords: number;
+    }
+  | {
       kind: "field";
       title: string;
       body: string[];

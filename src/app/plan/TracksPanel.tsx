@@ -13,8 +13,43 @@ const SUGGESTIONS = [
   ...PSYCH_TECHNIQUES.map((p) => ({ id: p.slug, label: p.title })),
 ];
 
+interface Review {
+  grasp: string;
+  action: string;
+  nextDepth: string | null;
+  reason: string;
+  responseCount: number;
+}
+
+const ACTION_TEXT: Record<string, string> = {
+  repeat_core_differently: "Repeat this layer with a different practice — not forward yet.",
+  hold: "Stay here a bit longer. It's landing, but not solid.",
+  advance_depth: "Ready to go deeper.",
+  increase_pace: "This is solid. Worth speeding up or adding a track.",
+};
+
 export default function TracksPanel({ initial, userId }: { initial: Track[]; userId: string }) {
   const [tracks, setTracks] = useState(initial);
+  const [reviews, setReviews] = useState<Record<string, Review | "loading">>({});
+
+  async function review(track: Track) {
+    setReviews((r) => ({ ...r, [track.id]: "loading" }));
+    try {
+      const res = await fetch("/api/track-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trackId: track.track_id }),
+      });
+      const data = await res.json();
+      setReviews((r) => ({ ...r, [track.id]: data }));
+    } catch {
+      setReviews((r) => {
+        const next = { ...r };
+        delete next[track.id];
+        return next;
+      });
+    }
+  }
   const [adding, setAdding] = useState(false);
   const [label, setLabel] = useState("");
   const [pace, setPace] = useState<Pace>("steady");
@@ -183,15 +218,37 @@ export default function TracksPanel({ initial, userId }: { initial: Track[]; use
                   )}
                 </div>
 
-                {due && (
+                {(due || reviews[track.id]) && (
                   <div className="mt-4 pt-4 border-t border-panel-border">
-                    <p className="text-sm text-muted leading-relaxed mb-2">
-                      This one is due a look. Is the pace right, or is it the format that isn&apos;t
-                      working?
-                    </p>
-                    <Link href="/chat" className="text-sm text-accent hover:opacity-80">
-                      Talk it over →
-                    </Link>
+                    {reviews[track.id] === "loading" ? (
+                      <p className="text-sm text-muted">Reading what you wrote…</p>
+                    ) : reviews[track.id] ? (
+                      <>
+                        <p className="text-sm leading-relaxed mb-1.5">
+                          {ACTION_TEXT[(reviews[track.id] as Review).action] ?? ""}
+                        </p>
+                        <p className="text-xs text-muted leading-relaxed mb-2">
+                          {(reviews[track.id] as Review).responseCount === 0
+                            ? "Nothing written back on this one yet, so this is a guess from timing alone. Finish a lesson and it gets an actual read."
+                            : (reviews[track.id] as Review).reason}
+                        </p>
+                        <Link href="/chat" className="text-sm text-accent hover:opacity-80">
+                          Talk it over →
+                        </Link>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm text-muted leading-relaxed mb-2">
+                          This one is due a look.
+                        </p>
+                        <button
+                          onClick={() => review(track)}
+                          className="text-sm text-accent hover:opacity-80"
+                        >
+                          See where it stands →
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
