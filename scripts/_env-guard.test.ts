@@ -374,8 +374,17 @@ describe("declared wiring status matches reality", () => {
     "register-source.ts",
   ].sort();
 
-  /** The guard, its binding table and its test are not database tools. */
+  /**
+   * Files in scripts/ that are NOT database write tools, and why each is exempt.
+   *
+   * megabrain-bench.ts is the interesting one: it spends real money on model
+   * providers, but it never writes to Supabase, so the database guard has
+   * nothing to say about it. It carries its own budget guard and refuses to run
+   * live without an explicit --live and --max-usd. Listing it here is the
+   * deliberate decision this test exists to force, not an oversight.
+   */
   const GUARD_FILES = [
+    "megabrain-bench.ts",
     "_env-guard.ts",
     "_env-guard.test.ts",
     "_environments.ts",
