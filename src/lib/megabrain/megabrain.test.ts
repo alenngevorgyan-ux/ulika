@@ -18,6 +18,7 @@ import { CostLedger, MODE_CAPS, BudgetExceededError, AccountingError, assertUsab
 import { MODELS, CONFIGURATIONS, costOf, estimateTokens, modelFor, resolveConfiguration, SMOKE_BASELINE, type BaselineKind } from "./modelRouter";
 import { runCase, runBaseline, runLight, runStrong, runAnalysis, renderAnalysis, MAX_OUTPUT_TOKENS, StageRejectedError } from "./engine";
 import { capFor, MODES, ModeNotAvailable, recommendMode } from "./analysisMode";
+import { labEnabled, resolveModelChoice, ModelChoiceRejected, LAB_MODEL_CHOICES } from "./labAccess";
 import { parseJsonReply, readTelemetry, type CompletionRequest } from "./transport";
 import { FROZEN_CASES } from "./evals/cases";
 import { gradeAnswer, summarise } from "./evals/graders";
@@ -1646,6 +1647,96 @@ describe("the run journal survives a mid-run failure", () => {
       .replace(/\s+/g, " ");
     expect(src).toContain("does not survive SIGKILL");
     expect(src).toContain("There is always a window");
+  });
+});
+
+describe("the lab is closed by default and cannot be opened from the client", () => {
+  const withFlag = <T,>(value: string | undefined, fn: () => T): T => {
+    const prev = process.env.MEGABRAIN_LAB;
+    if (value === undefined) delete process.env.MEGABRAIN_LAB;
+    else process.env.MEGABRAIN_LAB = value;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.MEGABRAIN_LAB;
+      else process.env.MEGABRAIN_LAB = prev;
+    }
+  };
+
+  it("is off unless explicitly enabled", () => {
+    expect(withFlag(undefined, labEnabled)).toBe(false);
+    expect(withFlag("false", labEnabled)).toBe(false);
+    expect(withFlag("1", labEnabled)).toBe(false);
+    expect(withFlag("true", labEnabled)).toBe(true);
+  });
+
+  it("refuses an arbitrary provider slug, even a real one", () => {
+    // The cheapest exploit against a metered API is naming an expensive model.
+    // A client sends a fixed id or nothing.
+    expect(() => resolveModelChoice("anthropic/claude-opus-4")).toThrow(ModelChoiceRejected);
+    expect(() => resolveModelChoice("x-ai/grok-4.3")).toThrow(ModelChoiceRejected);
+    expect(() => resolveModelChoice("../../etc/passwd")).toThrow(ModelChoiceRejected);
+  });
+
+  it("refuses a disabled model with the reason, not a silent fallback", () => {
+    expect(() => resolveModelChoice("sonnet-5")).toThrow(/404/);
+  });
+
+  it("accepts the fixed ids and maps them to router keys", () => {
+    expect(resolveModelChoice("auto")).toBeNull();
+    expect(resolveModelChoice(undefined)).toBeNull();
+    expect(resolveModelChoice("grok-4.3")).toBe("grok-4.3");
+    expect(resolveModelChoice("gemini-flash-lite")).toBe("gemini-3.1-flash-lite");
+  });
+
+  it("marks Sonnet unavailable rather than removing the choice", () => {
+    expect(LAB_MODEL_CHOICES["sonnet-5"].available).toBe(false);
+    expect(LAB_MODEL_CHOICES["sonnet-5"].note).toMatch(/404/);
+  });
+
+  it("never lets a model choice raise the cap", () => {
+    // The cap comes from the mode table on the server; nothing in the request
+    // body participates.
+    for (const m of ["light", "standard", "strong"] as const) {
+      expect(capFor(m, 99)).toBe(MODES[m].capUsd);
+    }
+  });
+
+  it("keeps the lab page and route out of any navigation", () => {
+    const nav = readFileSync(join(process.cwd(), "src/components/Nav.tsx"), "utf8");
+    expect(nav).not.toContain("megabrain-lab");
+  });
+
+  it("stores nothing about a live case in the browser", () => {
+    // Comments stripped first: the file explains that it does NOT use
+    // localStorage, and a bare search finds that explanation.
+    const client = readFileSync(join(process.cwd(), "src/app/admin/megabrain-lab/LabClient.tsx"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(client).not.toContain("localStorage");
+    expect(client).not.toContain("sessionStorage");
+    expect(client).not.toContain("indexedDB");
+  });
+
+  it("blocks a double submit with a ref, not with render state", () => {
+    // State updates are asynchronous; a second click can land before the
+    // re-render. A ref cannot be beaten that way.
+    const client = readFileSync(join(process.cwd(), "src/app/admin/megabrain-lab/LabClient.tsx"), "utf8");
+    expect(client).toContain("inFlight.current");
+    expect(client).toContain("AbortController");
+  });
+
+  it("returns codes from the route, never a provider body", () => {
+    const route = readFileSync(join(process.cwd(), "src/app/api/megabrain-lab/route.ts"), "utf8");
+    expect(route).toContain('error: "ENGINE_FAILED"');
+    // 404 rather than 403 for a disabled surface.
+    expect(route).toContain('new NextResponse("Not found", { status: 404 })');
+    // No artifact is written for a live case.
+    expect(route).not.toContain("writeArtifact");
+  });
+
+  it("checks admin on the server, not in the page component alone", () => {
+    const route = readFileSync(join(process.cwd(), "src/app/api/megabrain-lab/route.ts"), "utf8");
+    expect(route).toContain("app_admins");
+    expect(route).toContain("labEnabled()");
   });
 });
 
