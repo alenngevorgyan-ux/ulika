@@ -72,11 +72,36 @@ export const MODELS: Record<string, ModelSpec> = {
  * mapping would put an unverifiable name on a real cost decision. These are the
  * verified slugs; map the codenames onto them when the mapping is written down.
  */
+/**
+ * `three-stage` is the shipped pipeline. `two-stage` merges analyse into
+ * strategise and exists ONLY so a later benchmark can answer whether the
+ * separate analysis call earns its cost. It is defined, wired and tested; it is
+ * not run live in V0, and analyse has not been removed to make room for it.
+ */
+export type PipelineShape = "three-stage" | "two-stage";
+
 export interface Configuration {
   id: string;
   description: string;
   roles: Record<ModelRole, string>;
+  pipeline: PipelineShape;
 }
+
+/**
+ * The two controls the benchmark can compare against, named so they are never
+ * confused in a report.
+ *
+ * `matched-contract` is asked for the same deliverables as the engine in a
+ * single free-text call: it isolates STRUCTURE as the variable.
+ * `current-production` is the prompt the live product ships today: it measures
+ * the improvement a user would actually feel.
+ *
+ * They answer different questions and the first live smoke uses only
+ * matched-contract — running both doubles cost for a comparison nobody has
+ * asked for yet.
+ */
+export type BaselineKind = "matched-contract" | "current-production";
+export const SMOKE_BASELINE: BaselineKind = "matched-contract";
 
 export const CONFIGURATIONS: Record<string, Configuration> = {
   "cheap-extract-sonnet": {
@@ -88,6 +113,7 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       analyse: "claude-sonnet-5",
       strategise: "claude-sonnet-5",
     },
+    pipeline: "three-stage",
   },
   "cheap-extract-grok": {
     id: "cheap-extract-grok",
@@ -97,6 +123,7 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       analyse: "grok-4.3",
       strategise: "grok-4.3",
     },
+    pipeline: "three-stage",
   },
   "all-cheap": {
     id: "all-cheap",
@@ -106,6 +133,18 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       analyse: "gemini-3.1-flash-lite",
       strategise: "gemini-3.1-flash-lite",
     },
+    pipeline: "three-stage",
+  },
+  "ablation-two-call": {
+    id: "ablation-two-call",
+    description:
+      "Extraction, then one merged strategy call. Exists to test whether the separate analyse stage is worth its cost. Not run live in V0.",
+    roles: {
+      extract: "gemini-3.1-flash-lite",
+      analyse: "claude-sonnet-5",
+      strategise: "claude-sonnet-5",
+    },
+    pipeline: "two-stage",
   },
 };
 

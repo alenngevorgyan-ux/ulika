@@ -16,13 +16,22 @@
 // ----------------------------------------------------------------- 1. frame
 
 /** Where a statement came from. The whole product rests on not blurring these. */
-export type Provenance = "verified" | "claimed" | "interpreted";
+export type Provenance = "documented" | "reported" | "interpreted";
 
 export interface CaseFrame {
-  /** Checkable now, by the user, without trusting anyone's account. */
-  verifiedFacts: string[];
-  /** What the user asserts. True or not, it is their account, not evidence. */
-  userClaims: string[];
+  /**
+   * Backed by an artefact the user actually has: a contract clause, a dated
+   * message, a commit, a written policy.
+   *
+   * NAMED CAREFULLY. This used to be called `verifiedFacts` and was populated
+   * from the user's own account, which asserted a verification nobody performed
+   * — the exact false certainty the product exists to argue against. V0 has no
+   * mechanism to inspect a document, so this bucket will often and legitimately
+   * be EMPTY, and an empty bucket is the honest output rather than a failure.
+   */
+  documentedFacts: string[];
+  /** Stated by the user. Possibly true; it is testimony, not evidence. */
+  reportedFacts: string[];
   /** Readings the user has already layered on. Named so they can be doubted. */
   interpretations: string[];
   /** Gaps that would change the strategy if filled. Not trivia. */
@@ -116,6 +125,62 @@ export type StrategyKind = (typeof STRATEGY_KINDS)[number];
  */
 export type RiskLevel = "green" | "yellow" | "orange";
 
+/**
+ * What makes a move risky, as separable factors rather than one adjective.
+ *
+ * The old model treated relevance to the dispute as sufficient for legitimacy.
+ * It is not: a relevant fact can still be used coercively, obtained improperly,
+ * or pressed outside any proper channel, and the answer changes with a
+ * jurisdiction the system usually does not know. Splitting the factors is what
+ * lets the final answer be firm about the ones it can see and honest about the
+ * one it cannot.
+ */
+export interface RiskAssessment {
+  /** False whenever the account does not establish it — usually false. */
+  jurisdictionKnown: boolean;
+  /** What the user gets if it works. Naming it exposes disproportionate moves. */
+  requestedBenefit: string;
+  relevanceToDispute: "direct" | "tangential" | "unrelated";
+  informationSource: "user_owned" | "shared_with_user" | "third_party" | "improperly_obtained";
+  proceduralChannel: "formal" | "informal" | "none";
+  reversibility: "reversible" | "hard_to_reverse" | "irreversible";
+  retaliationRisk: "low" | "medium" | "high";
+  /**
+   * Free text. When jurisdictionKnown is false this must be non-empty, and the
+   * plan must not assert that a grey move is lawful — a test enforces both.
+   */
+  legalUncertainty: string;
+}
+
+/**
+ * Why a dangerous idea was replaced, WITHOUT restating it.
+ *
+ * The earlier field was a free-text `redirectedFrom` holding the original plan.
+ * That put an operational description of blackmail or surveillance into the
+ * response object, the debug output and any report built from them — the system
+ * would have been generating and storing the very instruction it declined to
+ * give. Categories and an objective carry the same explanatory value and none of
+ * the payload.
+ */
+export const REDIRECT_CATEGORIES = [
+  "unrelated_private_information",
+  "unauthorised_access",
+  "surveillance",
+  "reputational_pressure",
+  "threat_of_harm",
+  "deception_causing_harm",
+  "irreversible_escalation",
+] as const;
+export type RedirectCategory = (typeof REDIRECT_CATEGORIES)[number];
+
+export interface RedirectMetadata {
+  category: RedirectCategory;
+  /** Short, non-operational: why it was out of bounds. */
+  reason: string;
+  /** The legitimate goal the replacement still pursues. */
+  preservedObjective: string;
+}
+
 export interface Strategy {
   kind: StrategyKind;
   summary: string;
@@ -125,7 +190,7 @@ export interface Strategy {
   reversible: boolean;
   costIfItFails: string;
   /** Set when a dangerous idea was converted rather than dropped. */
-  redirectedFrom?: string;
+  redirect?: RedirectMetadata;
 }
 
 export interface StrategySet {
@@ -167,6 +232,7 @@ export interface FinalCasePlan {
   stopSignals: string[];
   fallbackPlan: string;
   risk: RiskLevel;
+  riskAssessment: RiskAssessment;
   /** Plain words. A percentage the code cannot derive is theatre. */
   uncertainty: string;
 }
@@ -211,8 +277,8 @@ export function validateFrame(raw: unknown): ValidationResult<CaseFrame> {
   const stakes = str(o.stakes, 1000);
   if (!stakes) problems.push("frame.stakes");
   const value: CaseFrame = {
-    verifiedFacts: strArr(o.verifiedFacts),
-    userClaims: strArr(o.userClaims),
+    documentedFacts: strArr(o.documentedFacts),
+    reportedFacts: strArr(o.reportedFacts),
     interpretations: strArr(o.interpretations),
     unknowns: strArr(o.unknowns),
     constraints: strArr(o.constraints),
@@ -220,10 +286,10 @@ export function validateFrame(raw: unknown): ValidationResult<CaseFrame> {
   };
   // A frame with nothing in any bucket means extraction failed, not that the
   // situation is simple.
-  if (
-    value.verifiedFacts.length + value.userClaims.length + value.interpretations.length ===
-    0
-  ) {
+  // documentedFacts may legitimately be empty — nothing here can inspect a
+  // document. Reported facts and interpretations may not both be empty: that
+  // means extraction failed, not that the situation is simple.
+  if (value.reportedFacts.length + value.interpretations.length === 0) {
     problems.push("frame.empty");
   }
   return { ok: problems.length === 0, value, problems };
@@ -307,6 +373,22 @@ export function validateLeverage(raw: unknown): ValidationResult<LeverageMap> {
   };
 }
 
+/**
+ * Redirect metadata is validated field by field and the category must be one of
+ * the known enum values. Anything free-form that a model tried to smuggle in
+ * alongside is dropped rather than carried, because the whole point of this
+ * shape is that it cannot hold an operational instruction.
+ */
+function redirect(raw: unknown): RedirectMetadata | null {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const category = REDIRECT_CATEGORIES.find((c) => c === o.category);
+  const reason = str(o.reason, 200);
+  const preservedObjective = str(o.preservedObjective, 200);
+  return category && reason && preservedObjective
+    ? { category, reason, preservedObjective }
+    : null;
+}
+
 export function validateStrategies(raw: unknown): ValidationResult<StrategySet> {
   const problems: string[] = [];
   const list = Array.isArray((raw as { strategies?: unknown })?.strategies)
@@ -327,7 +409,7 @@ export function validateStrategies(raw: unknown): ValidationResult<StrategySet> 
       risk,
       reversible: o.reversible === true,
       costIfItFails: str(o.costIfItFails, 600) ?? "",
-      ...(str(o.redirectedFrom, 600) ? { redirectedFrom: str(o.redirectedFrom, 600)! } : {}),
+      ...(redirect(o.redirect) ? { redirect: redirect(o.redirect)! } : {}),
     });
   }
   if (strategies.length < 3) problems.push("strategies.tooFew");
@@ -362,6 +444,47 @@ export function validateCountermoves(raw: unknown): ValidationResult<Countermove
   };
 }
 
+const EMPTY_RISK: RiskAssessment = {
+  jurisdictionKnown: false,
+  requestedBenefit: "",
+  relevanceToDispute: "tangential",
+  informationSource: "third_party",
+  proceduralChannel: "none",
+  reversibility: "hard_to_reverse",
+  retaliationRisk: "high",
+  legalUncertainty: "not assessed",
+};
+
+const oneOf = <T extends string>(v: unknown, options: readonly T[]): T | null =>
+  options.find((o) => o === v) ?? null;
+
+function validateRiskAssessment(raw: unknown): RiskAssessment | null {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const relevanceToDispute = oneOf(o.relevanceToDispute, ["direct", "tangential", "unrelated"] as const);
+  const informationSource = oneOf(o.informationSource, ["user_owned", "shared_with_user", "third_party", "improperly_obtained"] as const);
+  const proceduralChannel = oneOf(o.proceduralChannel, ["formal", "informal", "none"] as const);
+  const reversibility = oneOf(o.reversibility, ["reversible", "hard_to_reverse", "irreversible"] as const);
+  const retaliationRisk = oneOf(o.retaliationRisk, ["low", "medium", "high"] as const);
+  const requestedBenefit = str(o.requestedBenefit, 300);
+  const legalUncertainty = str(o.legalUncertainty, 600);
+  if (!relevanceToDispute || !informationSource || !proceduralChannel || !reversibility || !retaliationRisk || !requestedBenefit) {
+    return null;
+  }
+  const jurisdictionKnown = o.jurisdictionKnown === true;
+  // An unknown jurisdiction obliges the answer to say what it cannot settle.
+  if (!jurisdictionKnown && !legalUncertainty) return null;
+  return {
+    jurisdictionKnown,
+    requestedBenefit,
+    relevanceToDispute,
+    informationSource,
+    proceduralChannel,
+    reversibility,
+    retaliationRisk,
+    legalUncertainty: legalUncertainty ?? "",
+  };
+}
+
 export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
   const problems: string[] = [];
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -386,6 +509,9 @@ export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
   const exactWords = strArr(o.exactWords, 12);
   if (exactWords.length === 0) problems.push("plan.exactWords");
 
+  const ra = validateRiskAssessment(o.riskAssessment);
+  if (!ra) problems.push("plan.riskAssessment");
+
   return {
     ok: problems.length === 0,
     value: {
@@ -398,6 +524,7 @@ export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
       stopSignals: strArr(o.stopSignals),
       fallbackPlan: str(o.fallbackPlan, 1500) ?? "",
       risk: risk ?? "yellow",
+      riskAssessment: ra ?? EMPTY_RISK,
       uncertainty: uncertainty ?? "",
     },
     problems,

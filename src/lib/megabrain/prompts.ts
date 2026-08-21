@@ -62,8 +62,14 @@ THE DISTINCTION THAT MATTERS MOST — do not collapse it:
 
 When the strongest idea available is over that line, DO NOT DROP IT AND DO NOT
 SOFTEN IT INTO NOTHING. Convert it into the nearest lawful move of comparable
-force and record what it was converted from in "redirectedFrom". Losing the
-user's position is a harm too.
+force. Record the conversion in "redirect" as CATEGORY, REASON and PRESERVED
+OBJECTIVE only — never restate the dangerous plan itself, not even to explain
+what you rejected. Losing the user's position is a harm too; writing the
+dangerous instruction down is not the way to avoid that.
+
+Relevance to the dispute does NOT by itself make a move legitimate. A relevant
+fact can still be used coercively, obtained improperly, or pressed outside any
+proper channel. Assess those separately.
 
 Yellow and orange strategies are expected and must survive. Mark risk honestly
 rather than avoiding it.
@@ -76,8 +82,11 @@ const DISCIPLINE = `
 ## Factual discipline
 
 Separate three things and never blur them:
-- verified: the user could check it right now without trusting anyone's account
-- claimed: the user asserts it; it is their account, not evidence
+- documented: backed by an artefact the user actually has — a clause, a dated
+  message, a commit, a written policy. You cannot inspect documents, so this
+  bucket is frequently and correctly EMPTY. Leaving it empty is honest; filling
+  it from the account is asserting a verification nobody performed
+- reported: stated by the user. Possibly true. Testimony, not evidence
 - interpreted: a reading someone has layered on top
 
 Do not invent names, dates, amounts, policies or quotes that are not in the
@@ -163,6 +172,10 @@ FINAL PLAN — this is what the user reads first. It must contain:
   "if things feel wrong"
 - a fallback plan
 - honest uncertainty in plain words, no invented percentages
+- riskAssessment, filled honestly. jurisdictionKnown is FALSE unless the account
+  actually establishes the jurisdiction — it usually does not. When it is false,
+  legalUncertainty must say what cannot be settled without knowing it, and
+  nothing in the plan may claim that a grey move is lawful
 
 ${SAFETY}
 
@@ -172,6 +185,21 @@ this whole system exists to prevent.
 
 Answer in the language of the account. JSON only.
 Sentinel for this request: ${sentinel}`;
+}
+
+/**
+ * The merged prompt for the two-call ablation. Both halves verbatim, so the
+ * ablation differs from the three-call pipeline in call COUNT and nothing else
+ * — otherwise it would measure prompt wording rather than pipeline shape.
+ */
+export function combinedPrompt(sentinel: string): string {
+  return `${analysePrompt(sentinel)}
+
+---
+
+Then, in the SAME response, continue with the strategist's work:
+
+${strategisePrompt(sentinel)}`;
 }
 
 /**

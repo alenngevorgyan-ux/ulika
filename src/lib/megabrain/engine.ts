@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { CostLedger, MODE_CAPS, type CaseMode } from "./costLedger";
 import { modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
-import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA } from "./jsonSchemas";
-import { analysePrompt, baselinePrompt, extractPrompt, fence, strategisePrompt } from "./prompts";
+import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA } from "./jsonSchemas";
+import { analysePrompt, baselinePrompt, combinedPrompt, extractPrompt, fence, strategisePrompt } from "./prompts";
 import { parseJsonReply, type Transport } from "./transport";
 import {
   validateActors,
@@ -155,6 +155,39 @@ export async function runCase(
   // fail, and put us back to "we got JSON and hoped".
   requireOk("extract", [frame, actors]);
 
+  // ---- two-call ablation: analysis and strategy merged into one call.
+  // Defined so a later benchmark can ask whether the separate analyse stage
+  // earns its cost. Not run live in V0.
+  if (configuration.pipeline === "two-stage") {
+    const spec = modelFor(configuration, "strategise");
+    const raw = (await stage(
+      transport,
+      ledger,
+      "strategise",
+      spec,
+      combinedPrompt(sentinel),
+      JSON.stringify({ frame: frame.value, actors: actors.value }),
+      COMBINED_SCHEMA as unknown as { name: string; schema: Record<string, unknown> }
+    )) as Record<string, unknown>;
+
+    const h = validateHypotheses(raw.hypotheses);
+    const l = validateLeverage(raw.leverage);
+    const st = validateStrategies(raw.strategies);
+    const cm = validateCountermoves(raw.countermoves);
+    const pl = validatePlan(raw.plan);
+    problems.push(...h.problems, ...l.problems, ...st.problems, ...cm.problems, ...pl.problems);
+    requireOk("strategise", [h, l, st, cm, pl]);
+    return {
+      analysis: {
+        frame: frame.value!, actors: actors.value!, hypotheses: h.value!, leverage: l.value!,
+        strategies: st.value!, countermoves: cm.value!, plan: pl.value!,
+      },
+      ledger,
+      configuration,
+      problems,
+    };
+  }
+
   // ---- stage 2: hypotheses and leverage, on the strong model
   const analyseSpec = modelFor(configuration, "analyse");
   const analyseInput = JSON.stringify({ frame: frame.value, actors: actors.value });
@@ -228,7 +261,7 @@ export async function runBaseline(
   const mode: CaseMode = input.mode ?? "standard";
   const ledger = input.ledger ?? new CostLedger(mode, MODE_CAPS[mode]);
   const spec = modelFor(
-    { id: "baseline", description: "", roles: { extract: modelKey, analyse: modelKey, strategise: modelKey } },
+    { id: "baseline", description: "", pipeline: "three-stage", roles: { extract: modelKey, analyse: modelKey, strategise: modelKey } },
     "strategise"
   );
   const system = baselinePrompt();

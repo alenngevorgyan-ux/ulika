@@ -1,4 +1,4 @@
-import { LEVERAGE_KINDS, STRATEGY_KINDS } from "./schemas";
+import { LEVERAGE_KINDS, REDIRECT_CATEGORIES, STRATEGY_KINDS } from "./schemas";
 
 /**
  * JSON Schemas sent as `response_format`, so the provider constrains generation
@@ -27,8 +27,8 @@ export const EXTRACT_SCHEMA = {
   name: "case_extraction",
   schema: obj({
     frame: obj({
-      verifiedFacts: strings("Checkable without trusting anyone's account."),
-      userClaims: strings("What the user asserts. Their account, not evidence."),
+      documentedFacts: strings("Backed by an artefact the user has. Often legitimately empty."),
+      reportedFacts: strings("Stated by the user. Testimony, not evidence."),
       interpretations: strings("Readings already layered on by the user."),
       unknowns: strings("Gaps that would change the strategy if filled."),
       constraints: strings("Money, time, legal, relational limits."),
@@ -96,9 +96,17 @@ export const STRATEGISE_SCHEMA = {
           risk: { type: "string", enum: ["green", "yellow", "orange"] },
           reversible: { type: "boolean" },
           costIfItFails: { type: "string" },
-          redirectedFrom: {
-            type: "string",
-            description: "Set when a dangerous idea was converted to a lawful equivalent.",
+          redirect: {
+            type: "object",
+            additionalProperties: false,
+            description:
+              "Set when a dangerous idea was converted. Categories only — never restate the dangerous plan.",
+            required: ["category", "reason", "preservedObjective"],
+            properties: {
+              category: { type: "string", enum: [...REDIRECT_CATEGORIES] },
+              reason: { type: "string", description: "Non-operational: why it was out of bounds." },
+              preservedObjective: { type: "string" },
+            },
           },
         }),
       },
@@ -130,7 +138,35 @@ export const STRATEGISE_SCHEMA = {
       stopSignals: strings("Observable events, not feelings."),
       fallbackPlan: { type: "string" },
       risk: { type: "string", enum: ["green", "yellow", "orange"] },
+      riskAssessment: obj({
+        jurisdictionKnown: { type: "boolean" },
+        requestedBenefit: { type: "string" },
+        relevanceToDispute: { type: "string", enum: ["direct", "tangential", "unrelated"] },
+        informationSource: { type: "string", enum: ["user_owned", "shared_with_user", "third_party", "improperly_obtained"] },
+        proceduralChannel: { type: "string", enum: ["formal", "informal", "none"] },
+        reversibility: { type: "string", enum: ["reversible", "hard_to_reverse", "irreversible"] },
+        retaliationRisk: { type: "string", enum: ["low", "medium", "high"] },
+        legalUncertainty: { type: "string", description: "Required when jurisdictionKnown is false." },
+      }),
       uncertainty: { type: "string" },
     }),
   }),
+} as const;
+
+/**
+ * The merged shape for the two-call ablation: everything analyse and strategise
+ * produce, in one response. Composed from the two existing schemas rather than
+ * written again, so they cannot drift apart.
+ */
+export const COMBINED_SCHEMA = {
+  name: "case_analysis_and_plan",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["hypotheses", "leverage", "strategies", "countermoves", "plan"],
+    properties: {
+      ...ANALYSE_SCHEMA.schema.properties,
+      ...STRATEGISE_SCHEMA.schema.properties,
+    },
+  },
 } as const;

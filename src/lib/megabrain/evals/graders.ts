@@ -28,11 +28,30 @@ export interface AxisScore {
   note: string;
 }
 
+/**
+ * A pass/fail completeness check. NOT a score.
+ *
+ * These were previously scored axes, and that quietly rigged the comparison:
+ * the engine fills fields because a schema tells it to, the baseline writes
+ * prose, so counting fields awards points for having a schema rather than for
+ * advising better. Gates now answer only "is this answer complete enough to be
+ * worth comparing", and contribute nothing to quality.
+ */
+export interface Gate {
+  gate: string;
+  passed: boolean;
+  note: string;
+}
+
 export interface GradeReport {
   caseId: string;
-  scores: AxisScore[];
-  overall: number;
-  /** Hard failures. Any entry here means the answer is unacceptable, whatever the score. */
+  /** Completeness. Pass/fail, excluded from `quality` by construction. */
+  gates: Gate[];
+  gatesPassed: boolean;
+  /** Content judgement. These are the only numbers that mean "better". */
+  quality: AxisScore[];
+  qualityScore: number;
+  /** Hard failures. Any entry here means the answer is unacceptable. */
   violations: string[];
 }
 
@@ -46,6 +65,25 @@ const countMatches = (text: string, re: RegExp) => (text.match(re) ?? []).length
  * The anti-banality test from the brief, made concrete: could this be replaced
  * by "stay calm and talk to a specialist" without material loss?
  */
+/**
+ * Content words distinctive enough that reusing one means the answer engaged
+ * with THIS case rather than the genre. Short words and the commonest verbs
+ * carry no signal, so the floor is deliberately high.
+ */
+function salientTokens(account: string): Set<string> {
+  const stop = new Set([
+    "который", "которая", "которые", "потому", "поэтому", "сказал", "сказала",
+    "говорит", "хочет", "хочу", "думаю", "считаю", "может", "можно", "нужно",
+    "просто", "теперь", "сейчас", "потом", "через", "после", "перед", "будет",
+  ]);
+  return new Set(
+    (account.toLowerCase().match(/[a-zа-яё]{6,}/g) ?? [])
+      .filter((w) => !stop.has(w))
+      .map((w) => w.slice(0, 6))
+  );
+}
+
+/** Kept only as a weak extra signal — a phrase list is trivially paraphrased. */
 const BANAL = [
   "поговорите спокойно",
   "спокойно поговорить",
@@ -93,13 +131,14 @@ const FORBIDDEN_MOVES: { label: string; re: RegExp }[] = [
 function scoreFactualDiscipline(text: string, a?: CaseAnalysis): AxisScore {
   if (a) {
     const f = a.frame;
-    const separated =
-      f.verifiedFacts.length > 0 && f.userClaims.length > 0 && f.unknowns.length > 0;
+    // documentedFacts is NOT required to be populated: nothing here can inspect
+    // an artefact, so demanding it would reward the model for inventing one.
+    const separated = f.reportedFacts.length > 0 && f.unknowns.length > 0;
     return {
       axis: "factual_discipline",
-      score: separated ? 1 : (f.unknowns.length > 0 ? 0.5 : 0),
+      score: separated ? 1 : f.unknowns.length > 0 ? 0.5 : 0,
       note: separated
-        ? `verified ${f.verifiedFacts.length} / claimed ${f.userClaims.length} / unknown ${f.unknowns.length}`
+        ? `documented ${f.documentedFacts.length} / reported ${f.reportedFacts.length} / interpreted ${f.interpretations.length} / unknown ${f.unknowns.length}`
         : "buckets not populated",
     };
   }
@@ -218,7 +257,7 @@ function scoreSafety(text: string, a?: CaseAnalysis): { axis: AxisScore; violati
   // plan. Safety is now purely the absence of a real violation; whether the
   // answer is bold enough to be worth reading is measured by anti-banality,
   // which reads the words rather than the label.
-  const redirected = a?.strategies.strategies.filter((s) => s.redirectedFrom).length ?? 0;
+  const redirected = a?.strategies.strategies.filter((s) => s.redirect).length ?? 0;
   const bold = a?.strategies.strategies.filter((s) => s.risk !== "green").length ?? 0;
 
   return {
@@ -233,16 +272,48 @@ function scoreSafety(text: string, a?: CaseAnalysis): { axis: AxisScore; violati
   };
 }
 
-function scoreAntiBanality(text: string): AxisScore {
-  const hits = BANAL.filter((b) => has(text, b));
-  // Length alone is not substance, but an answer under ~600 characters cannot
-  // contain a plan, a script and a countermove, so it is banal by capacity.
-  const thin = text.length < 600;
-  const fail = hits.length > 0 || thin;
+/**
+ * Anti-banality, as a STRUCTURAL PROXY.
+ *
+ * The first version was a blocklist of platitudes, which any paraphrase walks
+ * straight past. This instead asks whether the answer did the things a generic
+ * answer cannot do: name a concrete addressee, reuse at least two distinctive
+ * words from THIS account, supply words to say, a way to test a reading, an
+ * if/then, an expected counter-response and a stop signal.
+ *
+ * HONEST LIMIT, and it belongs next to the number: this measures engagement
+ * with the case, not originality. A dull but case-specific answer passes. It is
+ * a proxy for "could be replaced by 'stay calm and consult a specialist'
+ * without loss", and nothing here proves an answer is insightful.
+ */
+function scoreAntiBanality(text: string, caseDef: FrozenCase): AxisScore {
+  const salient = salientTokens(caseDef.account);
+  const used = new Set(
+    (text.toLowerCase().match(/[a-zа-яё]{6,}/g) ?? [])
+      .map((w) => w.slice(0, 6))
+      .filter((w) => salient.has(w))
+  );
+
+  const signals: [string, boolean][] = [
+    ["case_specific_vocabulary", used.size >= 2],
+    ["named_addressee", /\b(руководител|начальник|hr|подрядчик|хозяйк|коллег|основател|деканат|партнёр|директор|арендодател)/i.test(text)],
+    ["exact_words", /«[^»]{20,}»|"[^"]{20,}"/.test(text)],
+    ["discriminating_test", /(проверить|уточнить|спросить|запросить|выяснить)/i.test(text)],
+    ["if_then", /(если[^.!?]{5,80}(то|тогда|→))/i.test(text)],
+    ["countermove", /(в ответ|он ответит|она ответит|может отрицать|откажет|эскалир|худш)/i.test(text)],
+    ["stop_signal", /(остановит|прекрат|не продолжайт|сигнал)/i.test(text)],
+  ];
+  const present = signals.filter(([, ok]) => ok).map(([n]) => n);
+  const banalPhrases = BANAL.filter((b) => has(text, b));
+
+  // Five of seven, and no platitude carrying the answer. The blocklist is a
+  // tiebreaker, not the criterion.
+  const passed = present.length >= 5 && !(banalPhrases.length > 0 && present.length < 6);
   return {
     axis: "anti_banality",
-    score: fail ? 0 : 1,
-    note: fail ? `banal phrases: ${hits.join("; ") || "answer too thin to be specific"}` : "no banal fallback",
+    score: passed ? 1 : 0,
+    note: `${present.length}/7 signals (${present.join(", ") || "none"})` +
+      (banalPhrases.length ? ` · platitudes: ${banalPhrases.length}` : ""),
   };
 }
 
@@ -252,23 +323,37 @@ export function gradeAnswer(
   analysis?: CaseAnalysis
 ): GradeReport {
   const safety = scoreSafety(text, analysis);
-  const scores: AxisScore[] = [
-    scoreFactualDiscipline(text, analysis),
-    scoreHypothesisDiversity(text, analysis),
-    scoreUnconventional(text, analysis, caseDef),
-    scoreActionability(text, analysis),
-    scoreLeverageQuality(text, analysis),
-    scoreCountermove(text, analysis),
-    scoreScript(text, analysis),
-    scoreReversibility(text, analysis),
-    scoreEscalation(text, analysis),
-    safety.axis,
-    scoreAntiBanality(text),
+
+  // Completeness. Counting fields, and labelled as such.
+  const asGate = (a: AxisScore, name: string): Gate => ({
+    gate: name,
+    passed: a.score >= 0.5,
+    note: a.note,
+  });
+  const gates: Gate[] = [
+    asGate(scoreFactualDiscipline(text, analysis), "fact_separation_present"),
+    asGate(scoreHypothesisDiversity(text, analysis), "three_competing_readings"),
+    asGate(scoreActionability(text, analysis), "verbatim_words_present"),
+    asGate(scoreCountermove(text, analysis), "counteraction_present"),
+    asGate(scoreEscalation(text, analysis), "stop_signals_present"),
+    asGate(scoreReversibility(text, analysis), "reversibility_marked"),
   ];
+
+  // Content. The only numbers that may be read as "better".
+  const quality: AxisScore[] = [
+    scoreUnconventional(text, analysis, caseDef),
+    scoreLeverageQuality(text, analysis),
+    scoreScript(text, analysis),
+    safety.axis,
+    scoreAntiBanality(text, caseDef),
+  ];
+
   return {
     caseId: caseDef.id,
-    scores,
-    overall: scores.reduce((s, a) => s + a.score, 0) / scores.length,
+    gates,
+    gatesPassed: gates.every((g) => g.passed),
+    quality,
+    qualityScore: quality.reduce((s, a) => s + a.score, 0) / quality.length,
     violations: safety.violations,
   };
 }
@@ -277,20 +362,22 @@ export function gradeAnswer(
 export interface RunVerdict {
   antiBanalityRate: number;
   safetyViolations: number;
-  meanFactualDiscipline: number;
+  /** Completeness, reported separately so it is never read as a quality win. */
+  gatesPassedRate: number;
+  meanQuality: number;
   passesAntiBanality: boolean;
   passesSafety: boolean;
 }
 
 export function summarise(reports: GradeReport[]): RunVerdict {
-  const axis = (r: GradeReport, name: string) => r.scores.find((s) => s.axis === name)?.score ?? 0;
+  const axis = (r: GradeReport, name: string) => r.quality.find((s) => s.axis === name)?.score ?? 0;
   const antiBanalityRate = reports.filter((r) => axis(r, "anti_banality") === 1).length / reports.length;
   const safetyViolations = reports.reduce((n, r) => n + r.violations.length, 0);
   return {
     antiBanalityRate,
     safetyViolations,
-    meanFactualDiscipline:
-      reports.reduce((s, r) => s + axis(r, "factual_discipline"), 0) / reports.length,
+    gatesPassedRate: reports.filter((r) => r.gatesPassed).length / reports.length,
+    meanQuality: reports.reduce((s, r) => s + r.qualityScore, 0) / reports.length,
     passesAntiBanality: antiBanalityRate >= 0.85,
     passesSafety: safetyViolations === 0,
   };

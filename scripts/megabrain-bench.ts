@@ -2,11 +2,14 @@ import "./_load-env";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIGURATIONS, MODELS, modelFor, resolveConfiguration } from "../src/lib/megabrain/modelRouter";
-import { MODE_CAPS, projectPipelineCost, CostLedger } from "../src/lib/megabrain/costLedger";
-import { MAX_OUTPUT_TOKENS, renderAnalysis, runBaseline, runCase } from "../src/lib/megabrain/engine";
+import { CONFIGURATIONS } from "../src/lib/megabrain/modelRouter";
+import { MODELS } from "../src/lib/megabrain/modelRouter";
+import { MODE_CAPS, CostLedger } from "../src/lib/megabrain/costLedger";
+import { benchmarkCost, engineCost, fitsStandardCap, scale } from "../src/lib/megabrain/costReport";
+import { renderAnalysis, runBaseline, runCase } from "../src/lib/megabrain/engine";
 import { createOpenRouterTransport } from "../src/lib/megabrain/transport";
 import { FROZEN_CASES } from "../src/lib/megabrain/evals/cases";
+import { SMOKE_BASELINE } from "../src/lib/megabrain/modelRouter";
 import { gradeAnswer, summarise } from "../src/lib/megabrain/evals/graders";
 import { compareBlind, summariseComparisons, type ComparisonResult } from "../src/lib/megabrain/evals/compare";
 
@@ -37,69 +40,38 @@ const LIMIT = Number(value("limit", "5"));
 const MAX_USD = Number(value("max-usd", "0"));
 const OUT_DIR = fileURLToPath(new URL("../bench", import.meta.url));
 
-/**
- * Worst case, and it must mean worst case.
- *
- * Every structured stage may run twice — one retry is allowed for unparseable
- * JSON — so a projection counting each stage once is not a ceiling. It is
- * doubled here. An earlier version quoted the single-pass number as "worst
- * case", which would have understated a run by up to a factor of two.
- */
-const RETRY_FACTOR = 2;
-
-function projectOne(configId: string) {
-  const cfg = resolveConfiguration(configId);
-  return projectPipelineCost([
-    { stage: "extract", spec: modelFor(cfg, "extract"), promptChars: 7500, maxOutputTokens: MAX_OUTPUT_TOKENS.extract },
-    { stage: "analyse", spec: modelFor(cfg, "analyse"), promptChars: 9000, maxOutputTokens: MAX_OUTPUT_TOKENS.analyse },
-    { stage: "strategise", spec: modelFor(cfg, "strategise"), promptChars: 12000, maxOutputTokens: MAX_OUTPUT_TOKENS.strategise },
-  ]);
-}
-
-function projectOneWorstCase(configId: string) {
-  const p = projectOne(configId);
-  return { ...p, totalUsd: p.totalUsd * RETRY_FACTOR };
-}
-
-/** Worst case per case: engine + baseline + judge, all at their ceilings. */
-function projectPerCase(configId: string) {
-  const engine = projectOneWorstCase(configId).totalUsd;
-  const baseline = projectPipelineCost([
-    { stage: "baseline", spec: MODELS["claude-sonnet-5"], promptChars: 4000, maxOutputTokens: MAX_OUTPUT_TOKENS.baseline },
-  ]).totalUsd;
-  const judge = projectPipelineCost([
-    { stage: "judge", spec: MODELS["grok-4.3"], promptChars: 14000, maxOutputTokens: 200 },
-  ]).totalUsd;
-  return { engine, baseline, judge, total: engine + baseline + judge };
-}
-
 async function dryRun() {
+  const usd = (n: number) => `$${n.toFixed(4)}`;
   console.log("DRY RUN — no requests, no cost.\n");
-  console.log("Per-case projection, at output ceilings.\n");
-  console.log("Two numbers, and the difference matters. The single pass is every stage");
-  console.log("once at its maximum output. The absolute ceiling additionally assumes every");
-  console.log("stage needed its one retry — a conjunction that should be rare. At runtime the");
-  console.log("guard reserves against ACTUAL accumulated spend, so the ceiling is a planning");
-  console.log("bound, not a prediction.\n");
+  console.log("Three bounds, and conflating them is what made earlier numbers disagree:");
+  console.log("  expected  — typical output length, no retry. A forecast.");
+  console.log("  reserved  — every stage once at its output ceiling. What the guard checks.");
+  console.log("  absolute  — every stage additionally using its one retry. A planning bound;");
+  console.log("              the guard reserves against ACTUAL spend, so it refuses a retry");
+  console.log("              rather than letting a case reach this. Retries are best-effort.\n");
+
+  console.log("A. PRODUCT RUNTIME — engine only, one Standard case\n");
   for (const id of Object.keys(CONFIGURATIONS)) {
-    const p = projectOneWorstCase(id);
-    const cap = MODE_CAPS.standard;
-    const single = projectOne(id).totalUsd;
+    const e = engineCost(id);
+    const fit = fitsStandardCap(id);
     console.log(
-      `  ${id.padEnd(22)} single pass $${single.toFixed(4)}  ` +
-        `absolute ceiling (every stage retried) $${p.totalUsd.toFixed(4)}  ` +
-        `${single <= cap ? "single pass OK" : "SINGLE PASS OVER CAP"}`
+      `  ${id.padEnd(22)} expected ${usd(e.expectedUsd)}  reserved ${usd(e.reservedUsd)}  absolute ${usd(e.absoluteUsd)}  ` +
+        `${fit.fits ? "within" : "OVER"} $${MODE_CAPS.standard} cap`
     );
   }
-  const per = projectPerCase(CONFIG_ID);
-  console.log(
-    `\nBenchmark cost per case with "${CONFIG_ID}": engine $${per.engine.toFixed(4)} + ` +
-      `baseline $${per.baseline.toFixed(4)} + judge $${per.judge.toFixed(4)} = $${per.total.toFixed(4)}`
-  );
-  console.log(`  5 cases   ≈ $${(per.total * 5).toFixed(2)}`);
-  console.log(`  20 cases  ≈ $${(per.total * 20).toFixed(2)}`);
-  console.log(`\nFrozen cases available: ${FROZEN_CASES.length}`);
-  console.log("Graders run offline; only the blind judge needs the network.");
+
+  const b = benchmarkCost(CONFIG_ID);
+  console.log(`\nB. BENCHMARK — engine + baseline + judge, configuration "${CONFIG_ID}"\n`);
+  for (const [label, bound] of [["engine", b.engine], ["baseline", b.baseline], ["judge", b.judge], ["TOTAL/case", b.total]] as const) {
+    console.log(`  ${label.padEnd(12)} expected ${usd(bound.expectedUsd)}  reserved ${usd(bound.reservedUsd)}  absolute ${usd(bound.absoluteUsd)}`);
+  }
+  console.log("\n  cases   expected    reserved    absolute");
+  for (const n of [1, 2, 5, 20]) {
+    const t = scale(b.total, n);
+    console.log(`  ${String(n).padStart(5)}   ${usd(t.expectedUsd).padEnd(11)} ${usd(t.reservedUsd).padEnd(11)} ${usd(t.absoluteUsd)}`);
+  }
+  console.log(`\nBaseline used in the smoke: ${SMOKE_BASELINE} (current-production baseline defined but not run).`);
+  console.log(`Frozen cases available: ${FROZEN_CASES.length}. Graders run offline; only the judge needs the network.`);
 }
 
 /** Re-read prices from the live catalogue. Free, unauthenticated, no key. */
@@ -139,11 +111,16 @@ async function live() {
   }
 
   const cases = FROZEN_CASES.slice(0, Math.max(1, LIMIT));
-  const per = projectPerCase(CONFIG_ID);
-  const projected = per.total * cases.length;
+  const per = benchmarkCost(CONFIG_ID).total;
+  // Gate on `reserved`: it is what the guard enforces per call. Using `absolute`
+  // would refuse runs that can never actually cost that much; using `expected`
+  // would start runs the guard then aborts halfway.
+  const projected = per.reservedUsd * cases.length;
   console.log(`Configuration : ${CONFIG_ID}`);
   console.log(`Cases         : ${cases.length}`);
-  console.log(`Projected     : $${projected.toFixed(3)} (worst case, at output ceilings)`);
+  console.log(`Baseline      : ${SMOKE_BASELINE}`);
+  console.log(`Reserved      : $${projected.toFixed(3)} (every stage at its output ceiling)`);
+  console.log(`Expected      : $${(per.expectedUsd * cases.length).toFixed(3)}`);
   console.log(`Hard limit    : $${MAX_USD.toFixed(2)}`);
   if (projected > MAX_USD) {
     console.error("\nRefusing to start: the worst case exceeds the limit. Lower --limit or raise --max-usd deliberately.");
@@ -156,8 +133,8 @@ async function live() {
   const grades = [];
 
   for (const c of cases) {
-    if (runLedger.remainingUsd < per.total) {
-      console.log(`\nStopping before ${c.id}: $${runLedger.remainingUsd.toFixed(3)} left, one case needs $${per.total.toFixed(3)}.`);
+    if (runLedger.remainingUsd < per.reservedUsd) {
+      console.log(`\nStopping before ${c.id}: $${runLedger.remainingUsd.toFixed(3)} left, one case reserves $${per.reservedUsd.toFixed(3)}.`);
       break;
     }
     process.stdout.write(`${c.id} … `);
@@ -194,7 +171,10 @@ async function live() {
   console.log(`anti-banality engine : ${(engineVerdict.antiBanalityRate * 100).toFixed(0)}%  (need ≥85%)  ${engineVerdict.passesAntiBanality ? "PASS" : "FAIL"}`);
   console.log(`anti-banality base   : ${(baselineVerdict.antiBanalityRate * 100).toFixed(0)}%`);
   console.log(`safety violations    : engine ${engineVerdict.safetyViolations}, baseline ${baselineVerdict.safetyViolations}`);
-  console.log(`factual discipline   : engine ${engineVerdict.meanFactualDiscipline.toFixed(2)}, baseline ${baselineVerdict.meanFactualDiscipline.toFixed(2)}`);
+  // Completeness and quality are printed apart, never summed. Gates measure
+  // whether an answer is worth comparing; only quality speaks to "better".
+  console.log(`structural gates     : engine ${(engineVerdict.gatesPassedRate * 100).toFixed(0)}%, baseline ${(baselineVerdict.gatesPassedRate * 100).toFixed(0)}%  (completeness, NOT a quality win)`);
+  console.log(`quality score        : engine ${engineVerdict.meanQuality.toFixed(2)}, baseline ${baselineVerdict.meanQuality.toFixed(2)}`);
   console.log(`total spent          : $${runLedger.spentUsd.toFixed(3)} of $${MAX_USD.toFixed(2)}`);
 
   mkdirSync(OUT_DIR, { recursive: true });

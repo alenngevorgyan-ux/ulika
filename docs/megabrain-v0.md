@@ -58,27 +58,35 @@ npx tsx scripts/megabrain-bench.ts --verify-prices
 It exits non-zero if a recorded price has drifted, because a wrong number there
 silently breaks the one control that stops a runaway bill.
 
-Two numbers, and the difference matters:
+**One canonical calculation**, in `src/lib/megabrain/costReport.ts`, derived
+from the live configuration. Every figure in every report comes from there.
+Earlier messages quoted several different numbers for the same things, because
+some counted retries and some did not and the baseline's ceiling changed
+underneath them. Numbers that drift like that are worse than no numbers.
 
-| configuration | single pass | absolute ceiling |
-|---|---|---|
-| `cheap-extract-sonnet` (default) | $0.067 | $0.134 |
-| `cheap-extract-grok` | $0.024 | $0.049 |
-| `all-cheap` | $0.012 | $0.025 |
+Three bounds, and conflating them is what caused that:
 
-**Single pass** is every stage once at its maximum output. **Absolute ceiling**
-additionally assumes every stage needed its one JSON retry — a conjunction that
-should be rare, and the number the dry run reports so nobody is surprised by it.
+- **expected** — typical output length, no retry. A forecast, nothing more.
+- **reserved** — every stage once at its output ceiling. **This is what the
+  budget guard actually checks before each call**, and the only one that is a
+  promise.
+- **absolute** — every stage additionally consuming its one retry. A planning
+  bound requiring an unlikely conjunction.
 
-Neither is what the runtime guard uses. It reserves each call against **actual
-accumulated spend**, so on the default configuration a Standard case has real
-retry headroom under $0.10 even though the pessimistic ceiling exceeds it. Both
-facts are asserted by tests, because the ceiling reads like a contradiction of
-the cap and is not one.
+Run `--dry-run` for the current table; it prints product runtime (engine only)
+and benchmark (engine + baseline + judge) separately, at 1 / 2 / 5 / 20 cases.
 
-The guard reserves against the OUTPUT CEILING of the call it is about to make,
-never against a hoped-for length — reserving against typical output is how a
-long generation walks through a cap.
+### Retries are best-effort, not guaranteed
+
+A Standard case never exceeds $0.10. If the remaining budget cannot cover the
+FULL reservation for a retry, the retry does not happen: no second request is
+issued, the case ends with a controlled budget error, and the ledger records the
+refusal. There is no partial retry and no manual path around the cap.
+
+The consequence is worth stating plainly rather than discovering: on the default
+Sonnet configuration a retry usually fits, and sometimes it will not. When it
+does not, the case fails instead of costing more. A test asserts exactly this —
+that the second API call is never issued and total spend stays under the cap.
 
 ```bash
 npx tsx scripts/megabrain-bench.ts --dry-run   # free, the default
@@ -116,7 +124,16 @@ result and should end V0, not trigger a search for a better prompt.
 
 ## Graders
 
-Eleven axes, all deterministic. Same input, same score, every time. Nothing is
+Completeness and quality are graded and reported SEPARATELY, and never summed.
+
+**Structural gates** are pass/fail: fact separation present, three competing
+readings, verbatim words, counteraction, stop signals, reversibility marked.
+They answer "is this answer complete enough to be worth comparing" and award no
+quality points — the engine fills fields because a schema tells it to and the
+baseline writes prose, so counting fields would award points for having a
+schema.
+
+**Quality axes** are the only numbers that may be read as "better". Same input, same score, every time. Nothing is
 model-graded except the pairwise comparison, because a model scoring "was this
 good" produces a number that looks like measurement and is not — the exact move
 this product argues against.
@@ -179,6 +196,12 @@ in half of them a user whose own framing is probably wrong.
   real cost decision would be worse than using the slug.
 - **p95 cost is projected, not measured.** It becomes real after the first live
   run over all 20 cases.
+- **Anti-banality is a structural proxy, not proof of originality.** It asks
+  whether the answer named a concrete addressee, reused at least two distinctive
+  words from this account, supplied words to say, a way to test a reading, an
+  if/then, an expected counter-response and a stop signal. A dull but
+  case-specific answer passes it. It measures engagement with the case, not
+  insight, and no number it produces should be read as the latter.
 - **Structural graders count fields, not quality.** Number of hypotheses, of
   exact-words lines, of leverage kinds and of countermoves are structural checks.
   They are worth having and they are not evidence that a strategy is good. A win

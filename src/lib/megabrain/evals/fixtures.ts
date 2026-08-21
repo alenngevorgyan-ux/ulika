@@ -12,8 +12,14 @@ import type { CompletionRequest, CompletionResult, Transport } from "../transpor
 
 export const GOOD_ANALYSIS: CaseAnalysis = {
   frame: {
-    verifiedFacts: ["История коммитов и переписка сохранены и доступны."],
-    userClaims: ["Архитектуру писал пользователь.", "Руководитель не упомянул его на презентации."],
+    // Empty on purpose: nothing in V0 can inspect an artefact, so a populated
+    // documentedFacts would be an asserted verification nobody performed.
+    documentedFacts: [],
+    reportedFacts: [
+      "Архитектуру писал пользователь.",
+      "Руководитель не упомянул его на презентации.",
+      "История коммитов и переписка сохранены.",
+    ],
     interpretations: ["Руководитель намеренно присваивает работу."],
     unknowns: ["Что именно сказали на правлении помимо презентации.", "Что означает «разгрузим» формально."],
     constraints: ["Прямой руководитель контролирует оценку и задачи."],
@@ -80,7 +86,7 @@ export const GOOD_ANALYSIS: CaseAnalysis = {
       { kind: "low_risk", summary: "Зафиксировать цели письменно.", firstMove: "Попросить встречу один на один и письменные цели на квартал.", risk: "green", reversible: true, costIfItFails: "Потеря недели." },
       { kind: "fast", summary: "Уточнить статус до распределения задач.", firstMove: "Написать руководителю короткое письмо с вопросом о роли в следующем квартале.", risk: "yellow", reversible: true, costIfItFails: "Раннее обозначение позиции." },
       { kind: "strong_negotiation", summary: "Связать участие с результатом, который он показывает наверх.", firstMove: "Обозначить, какие части системы требуют владельца, и предложить себя явно.", risk: "yellow", reversible: true, costIfItFails: "Возможный отказ в явной форме." },
-      { kind: "unconventional", summary: "Сделать авторство побочным продуктом процесса.", firstMove: "Предложить формат квартального технического отчёта с указанием владельцев компонентов.", risk: "yellow", reversible: true, costIfItFails: "Предложение отклонят.", redirectedFrom: "Письмо директору через голову руководителя с приложением доказательств." },
+      { kind: "unconventional", summary: "Сделать авторство побочным продуктом процесса.", firstMove: "Предложить формат квартального технического отчёта с указанием владельцев компонентов.", risk: "yellow", reversible: true, costIfItFails: "Предложение отклонят.", redirect: { category: "reputational_pressure", reason: "coercive_escalation_over_manager", preservedObjective: "secure_recognition_of_authorship" } },
       { kind: "exit_contingency", summary: "Подготовить альтернативу без объявления.", firstMove: "Обновить резюме и собрать рекомендателей вне прямой линии подчинения.", risk: "green", reversible: true, costIfItFails: "Потраченное время." },
     ],
   },
@@ -108,6 +114,16 @@ export const GOOD_ANALYSIS: CaseAnalysis = {
     stopSignals: ["Отказ фиксировать что-либо письменно", "Приглашение HR на разговор без повестки"],
     fallbackPlan: "Собрать рекомендателей вне прямой линии подчинения и выйти на рынок до цикла оценки.",
     risk: "yellow",
+    riskAssessment: {
+      jurisdictionKnown: false,
+      requestedBenefit: "Сохранить зону ответственности и признание авторства.",
+      relevanceToDispute: "direct",
+      informationSource: "user_owned",
+      proceduralChannel: "formal",
+      reversibility: "reversible",
+      retaliationRisk: "medium",
+      legalUncertainty: "Юрисдикция и применимое трудовое право из рассказа не следуют; вопрос о правах на результат не решается без них.",
+    },
     uncertainty: "Причина изменения роли неизвестна; вероятны как минимум три разных объяснения.",
   },
 };
@@ -134,6 +150,8 @@ export const BANAL_BASELINE = `Понимаю, как это неприятно.
 
 interface FixtureOptions {
   spy?: CompletionRequest[];
+  /** Incremented on every request, so a test can prove a call did NOT happen. */
+  callCount?: { n: number };
   extractReturnsGarbageFirst?: boolean;
   alwaysGarbage?: boolean;
   /** Structurally valid JSON that a validator must still refuse. */
@@ -143,6 +161,8 @@ interface FixtureOptions {
   emptyFrame?: boolean;
   /** Force one unparseable reply from the strategy stage, to exercise a retry. */
   strategiseGarbageFirst?: boolean;
+  /** Answer the merged two-call ablation schema. */
+  combined?: boolean;
 }
 
 /**
@@ -164,6 +184,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
   let strategiseCalls = 0;
   return async (req): Promise<CompletionResult> => {
     opts.spy?.push(req);
+    if (opts.callCount) opts.callCount.n++;
     if (opts.alwaysGarbage) return { content: "not json", usage: usage(100, 10), latencyMs: 5 };
 
     const name = req.jsonSchema?.name;
@@ -173,7 +194,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
         return { content: "sorry, here is prose", usage: usage(900, 20), latencyMs: 5 };
       }
       const frame = opts.emptyFrame
-        ? { ...GOOD_ANALYSIS.frame, verifiedFacts: [], userClaims: [], interpretations: [] }
+        ? { ...GOOD_ANALYSIS.frame, documentedFacts: [], reportedFacts: [], interpretations: [] }
         : GOOD_ANALYSIS.frame;
       return {
         content: JSON.stringify({ frame, actors: GOOD_ANALYSIS.actors }),
@@ -204,6 +225,19 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
         usage: usage(1800, 1100, 0.03), latencyMs: 4100,
       };
     }
+    if (name === "case_analysis_and_plan") {
+      return {
+        content: JSON.stringify({
+          hypotheses: GOOD_ANALYSIS.hypotheses,
+          leverage: GOOD_ANALYSIS.leverage,
+          strategies: GOOD_ANALYSIS.strategies,
+          countermoves: GOOD_ANALYSIS.countermoves,
+          plan: GOOD_ANALYSIS.plan,
+        }),
+        usage: usage(2500, 1600, 0.045), latencyMs: 5200,
+      };
+    }
+
     // Baseline or judge: free text.
     return { content: BANAL_BASELINE, usage: usage(700, 200, 0.01), latencyMs: 1500 };
   };
