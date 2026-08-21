@@ -61,7 +61,7 @@ export interface LedgerEntry {
   seq: number;
   /** 0 for a first attempt, 1 for its one permitted retry. */
   retryNumber: number;
-  /** Provider's id for the generation; what /generations?id= accepts. */
+  /** Provider's id for the generation; what /api/v1/generation?id= accepts. */
   responseId: string | null;
   /** Model the provider says it served. */
   reportedModel: string | null;

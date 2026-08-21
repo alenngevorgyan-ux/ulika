@@ -40,7 +40,7 @@ export interface CompletionRequest {
  * response headers, the key.
  */
 export interface ResponseTelemetry {
-  /** Provider's own id for the generation. What /generations?id= takes. */
+  /** Provider's own id for the generation. What /api/v1/generation?id= takes. */
   responseId: string | null;
   /** Model the provider says it served. */
   reportedModel: string | null;
