@@ -1,5 +1,5 @@
 import type { CaseAnalysis } from "../schemas";
-import type { CompletionRequest, CompletionResult, Transport } from "../transport";
+import { ProviderHttpError, type CompletionRequest, type CompletionResult, type Transport } from "../transport";
 
 /**
  * Fixtures for every test in this module.
@@ -171,6 +171,8 @@ interface FixtureOptions {
   brokenCost?: { value: unknown };
   /** Claim a different served model than the one requested. */
   reportedModel?: string;
+  /** Throw a provider 404 at the strategy stage, as the first live run did. */
+  failAtStrategise?: boolean;
   /** Report a charge far above what could have been reserved. */
   overcharge?: boolean;
   /**
@@ -256,6 +258,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       }));
     }
     if (name === "case_plan") {
+      if (opts.failAtStrategise) throw new ProviderHttpError(404, req.modelSlug, "404");
       strategiseCalls++;
       if (opts.strategiseGarbageFirst && strategiseCalls === 1) {
         return withModel(tamper({ content: "прошу прощения, вот текстом", usage: usage(1800, 30), latencyMs: 900 }));

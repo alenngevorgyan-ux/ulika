@@ -134,12 +134,23 @@ export class CostLedger {
    * baseline and judge additionally stop any of them consuming another's
    * remainder.
    */
+  /**
+   * Called the moment an entry is recorded, including a budget refusal.
+   *
+   * Exists so accounting can be written to disk AS IT HAPPENS. The previous
+   * design held everything in memory and serialised once at the end of the run;
+   * a mid-run failure therefore discarded every per-call record while the money
+   * had already been spent.
+   */
+  onRecord?: (entry: LedgerEntry) => void;
+
   constructor(
     readonly mode: CaseMode,
     readonly capUsd: number = MODE_CAPS[mode],
     readonly parent?: CostLedger
   ) {
     parent?.children.push(this);
+    this.onRecord = parent?.onRecord;
   }
 
   /**
@@ -222,6 +233,7 @@ export class CostLedger {
         requestBudgetUsd: this.remainingUsd,
         stoppedByBudgetGuard: true,
       });
+      this.onRecord?.(this.entries[this.entries.length - 1]);
       throw new BudgetExceededError(stage, this.spentUsd + projectedUsd, this.capUsd);
     }
     return { inputTokens, projectedUsd };
@@ -286,6 +298,7 @@ export class CostLedger {
       stoppedByBudgetGuard: false,
     };
     this.entries.push(entry);
+    this.onRecord?.(entry);
     return entry;
   }
 }

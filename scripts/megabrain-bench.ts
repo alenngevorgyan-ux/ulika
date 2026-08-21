@@ -12,6 +12,7 @@ import { FROZEN_CASES } from "../src/lib/megabrain/evals/cases";
 import { SMOKE_BASELINE } from "../src/lib/megabrain/modelRouter";
 import { gradeAnswer, summarise } from "../src/lib/megabrain/evals/graders";
 import { compareBlind, summariseComparisons, type ComparisonResult } from "../src/lib/megabrain/evals/compare";
+import { RunRecorder, describeFailure } from "../src/lib/megabrain/runRecorder";
 
 /**
  * The ONLY thing in this repository that can spend money, and it never runs by
@@ -140,19 +141,33 @@ async function live() {
   }
 
   const transport = createOpenRouterTransport(key);
+  // Opened BEFORE the first request, so there is a file on disk from the moment
+  // money can start moving.
+  mkdirSync(OUT_DIR, { recursive: true });
+  const recorder = new RunRecorder(join(OUT_DIR, `run-${Date.now()}.jsonl`), {
+    configuration: CONFIG_ID,
+    caseId: FROZEN_CASES.slice(0, Math.max(1, LIMIT)).map((c) => c.id).join(","),
+    capUsd: MAX_USD,
+    baseline: SMOKE_BASELINE,
+  });
+  let currentStage: string | null = null;
   // The command's total. Every component runs inside its OWN envelope carved
   // from this, so none of them can consume another's remainder, and the engine
   // additionally cannot exceed the Standard cap whatever this number is.
   const runLedger = new CostLedger("standard", MAX_USD);
+  runLedger.onRecord = recorder.onLedgerEntry;
   const comparisons: ComparisonResult[] = [];
   const grades = [];
 
+  try {
   for (const c of cases) {
     if (runLedger.remainingUsd < per.reservedUsd) {
       console.log(`\nStopping before ${c.id}: $${runLedger.remainingUsd.toFixed(3)} left, one case reserves $${per.reservedUsd.toFixed(3)}.`);
       break;
     }
     process.stdout.write(`${c.id} … `);
+    recorder.note("case_started", { caseId: c.id });
+    currentStage = "engine";
     // ONE ledger for the whole run. Engine stages, their retries, the baseline
     // and the judge all reserve against it before going out, so --max-usd is a
     // real ceiling rather than something checked after the money is gone.
@@ -161,6 +176,7 @@ async function live() {
       { account: c.account, configurationId: CONFIG_ID, ledger: runLedger },
       transport
     );
+    currentStage = "baseline";
     const base = await runBaseline(
       { account: c.account, ledger: runLedger.envelope(per.baselineReserved) },
       transport
@@ -172,12 +188,25 @@ async function live() {
       baseline: gradeAnswer(c, base.answer),
     });
 
+    currentStage = "judge";
     const verdict = await compareBlind(
       { caseId: c.id, account: c.account, engineAnswer: rendered, baselineAnswer: base.answer },
       { transport, ledger: runLedger.envelope(per.judgeReserved) }
     );
     comparisons.push(verdict);
     console.log(`${verdict.winner}  (spent $${runLedger.spentUsd.toFixed(3)})`);
+  }
+
+  } catch (e) {
+    // The money is already spent; what is left to protect is the record of it.
+    recorder.finish("incomplete", describeFailure(e, currentStage), {
+      spentUsd: runLedger.spentUsd,
+      capUsd: MAX_USD,
+      completedCases: comparisons.length,
+    });
+    console.error(`\nRUN INCOMPLETE at stage "${currentStage}". Journal: ${recorder.file.replace(process.cwd(), ".")}`);
+    console.error(`Spent before the failure: $${runLedger.spentUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}.`);
+    throw e;
   }
 
   const cmp = summariseComparisons(comparisons);
@@ -196,7 +225,7 @@ async function live() {
   console.log(`quality score        : engine ${engineVerdict.meanQuality.toFixed(2)}, baseline ${baselineVerdict.meanQuality.toFixed(2)}`);
   console.log(`total spent          : $${runLedger.spentUsd.toFixed(3)} of $${MAX_USD.toFixed(2)}`);
 
-  mkdirSync(OUT_DIR, { recursive: true });
+  recorder.finish("complete", undefined, { spentUsd: runLedger.spentUsd, capUsd: MAX_USD, completedCases: comparisons.length });
   const out = join(OUT_DIR, `megabrain-${Date.now()}.json`);
   // The ledger carries no conversation content, so the report is safe to keep.
   writeFileSync(out, JSON.stringify({ config: CONFIG_ID, comparisons, cmp, engineVerdict, baselineVerdict, ledger: runLedger.allDeep() }, null, 2));

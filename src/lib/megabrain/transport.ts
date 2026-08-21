@@ -42,6 +42,25 @@ export interface CompletionResult {
 
 export type Transport = (req: CompletionRequest) => Promise<CompletionResult>;
 
+/**
+ * An HTTP failure from the provider, carrying only what is safe and useful.
+ *
+ * Structured rather than a string because the run recorder has to write the
+ * status and the requested slug into a partial report — and because "Provider
+ * request failed (404)" told us the request failed and nothing about WHICH
+ * request, which is how a $0.0157 run ended with no idea what it bought.
+ */
+export class ProviderHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly requestedModel: string,
+    readonly code: string | null
+  ) {
+    super(`Provider request failed (${status}) for ${requestedModel}${code ? ` [${code}]` : ""}`);
+    this.name = "ProviderHttpError";
+  }
+}
+
 const DEFAULT_TIMEOUT_MS = 90_000;
 
 /**
@@ -121,7 +140,7 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         // which in this product is somebody's job, marriage or dispute. The
         // status code and, when present, a short machine code are enough to
         // act on; the prose is not worth the leak.
-        throw new Error(`Provider request failed (${res.status})${await errorCode(res)}`);
+        throw new ProviderHttpError(res.status, req.modelSlug, await errorCode(res));
       }
 
       const data = (await res.json()) as {
@@ -149,16 +168,16 @@ export function createOpenRouterTransport(apiKey: string): Transport {
  * Deliberately narrow: `code` and `type` are enum-like and safe, `message` is
  * free text written by the provider about our request and is never read.
  */
-async function errorCode(res: Response): Promise<string> {
+async function errorCode(res: Response): Promise<string | null> {
   try {
     const data = (await res.json()) as { error?: { code?: unknown; type?: unknown } };
     const parts = [data.error?.code, data.error?.type]
       .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
       .map((v) => String(v))
       .filter((v) => v.length <= 40 && /^[\w.-]+$/.test(v));
-    return parts.length ? ` [${parts.join("/")}]` : "";
+    return parts.length ? parts.join("/") : null;
   } catch {
-    return "";
+    return null;
   }
 }
 

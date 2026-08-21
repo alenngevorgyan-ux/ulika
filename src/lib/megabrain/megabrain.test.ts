@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { RunRecorder, describeFailure } from "./runRecorder";
+import { ProviderHttpError } from "./transport";
 import { EXTRACT_SCHEMA, STRATEGISE_SCHEMA } from "./jsonSchemas";
 import { join } from "node:path";
 import {
@@ -922,6 +925,113 @@ describe("the ledger reports what actually happened, in order", () => {
     await runBaseline({ account: "x", ledger: benchmark.envelope(0.05) }, fixtureTransport({}));
     const stages = benchmark.allDeep().map((e) => e.stage);
     expect(stages).toEqual(["extract", "analyse", "strategise", "baseline"]);
+  });
+});
+
+describe("the run journal survives a mid-run failure", () => {
+  const tmp = () => join(tmpdir(), `ulika-run-${Math.random().toString(16).slice(2)}.jsonl`);
+
+  it("writes a line per accounted call, as it happens", async () => {
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.15, baseline: "matched-contract" });
+    const ledger = new CostLedger("standard", 1);
+    ledger.onRecord = rec.onLedgerEntry;
+    await runCase({ account: "x", ledger }, fixtureTransport({}));
+    const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[0].t).toBe("run_started");
+    expect(lines.filter((l) => l.t === "ledger").map((l) => l.stage)).toEqual(["extract", "analyse", "strategise"]);
+    rmSync(path);
+  });
+
+  it("has the accounting on disk even when the run then throws", async () => {
+    // The failure that produced this file: a run charged real money and left no
+    // per-call record, because the report was written only after the loop.
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.15, baseline: "matched-contract" });
+    const ledger = new CostLedger("standard", 1);
+    ledger.onRecord = rec.onLedgerEntry;
+    await expect(
+      runCase({ account: "x", ledger }, fixtureTransport({ failAtStrategise: true }))
+    ).rejects.toThrow(ProviderHttpError);
+
+    const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const stages = lines.filter((l) => l.t === "ledger").map((l) => l.stage);
+    expect(stages).toEqual(["extract", "analyse"]);
+    expect(lines.some((l) => l.costSource === "provider")).toBe(true);
+    rmSync(path);
+  });
+
+  it("records the failing stage, slug, status and code — and nothing else about the request", async () => {
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.15, baseline: "matched-contract" });
+    const secret = "уникальнаястрокаизрассказа";
+    try {
+      // Default configuration: the fixture's per-stage charges are sized for it,
+      // so the run reaches the strategy stage instead of failing accounting first.
+      await runCase({ account: secret }, fixtureTransport({ failAtStrategise: true }));
+    } catch (e) {
+      rec.finish("incomplete", describeFailure(e, "engine"), { spentUsd: 0.0157 });
+    }
+    const text = readFileSync(path, "utf8");
+    const last = JSON.parse(text.trim().split("\n").pop()!);
+    expect(last.status).toBe("incomplete");
+    expect(last.failure.httpStatus).toBe(404);
+    expect(last.failure.requestedModel).toBe("anthropic/claude-sonnet-5");
+    expect(last.failure.errorKind).toBe("ProviderHttpError");
+    expect(last.failure.providerCode).toBe("404");
+    // No prompt, no answer, no account.
+    expect(text).not.toContain(secret);
+    rmSync(path);
+  });
+
+  it("carries no prompt, answer or account text anywhere in the journal", async () => {
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.15, baseline: "matched-contract" });
+    const ledger = new CostLedger("standard", 1);
+    ledger.onRecord = rec.onLedgerEntry;
+    const secret = "совершенноуникальныйтекстрассказа";
+    await runCase({ account: secret, ledger }, fixtureTransport({}));
+    rec.finish("complete");
+    const text = readFileSync(path, "utf8");
+    for (const forbidden of [secret, GOOD_ANALYSIS.plan.conclusion, GOOD_ANALYSIS.plan.exactWords[0]]) {
+      expect(text).not.toContain(forbidden);
+    }
+    rmSync(path);
+  });
+
+  it("records a budget refusal too, not only successful calls", async () => {
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.01, baseline: "matched-contract" });
+    const ledger = new CostLedger("standard", 0.001);
+    ledger.onRecord = rec.onLedgerEntry;
+    await expect(runCase({ account: "x", ledger }, fixtureTransport({}))).rejects.toThrow(BudgetExceededError);
+    const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines.some((l) => l.t === "ledger" && l.stoppedByBudgetGuard === true)).toBe(true);
+    rmSync(path);
+  });
+
+  it("does not file our own error codes under a provider field", async () => {
+    // An internal AccountingError code landing in providerCode would send
+    // whoever reads the journal to the provider's docs for a string we invented.
+    let described;
+    try {
+      await runCase({ account: "x" }, fixtureTransport({ overcharge: true }));
+    } catch (e) {
+      described = describeFailure(e, "engine");
+    }
+    expect(described!.providerCode).toBeNull();
+    expect(described!.internalCode).toBe("COST_ABOVE_RESERVED");
+    expect(described!.errorKind).toBe("AccountingError");
+  });
+
+  it("states its own limit rather than promising crash-proof persistence", () => {
+    // Normalised: the sentence is wrapped across comment lines, and a literal
+    // search would fail on the line break rather than on a missing caveat.
+    const src = readFileSync(join(process.cwd(), "src/lib/megabrain/runRecorder.ts"), "utf8")
+      .replace(/\s*\*\s*/g, " ")
+      .replace(/\s+/g, " ");
+    expect(src).toContain("does not survive SIGKILL");
+    expect(src).toContain("There is always a window");
   });
 });
 
