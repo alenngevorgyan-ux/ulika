@@ -5,6 +5,8 @@ import ReplyBlocks from "@/components/chat/ReplyBlocks";
 import ThinkingIndicator from "@/components/chat/ThinkingIndicator";
 import { ModeIndicator } from "@/components/chat/primitives";
 import { parseBlocks } from "@/lib/mentalist/parseBlocks";
+import { useCaseState } from "@/lib/interaction/useCaseState";
+import { useT } from "@/lib/i18n/useT";
 
 interface Message {
   role: "user" | "assistant";
@@ -52,6 +54,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const { t, locale } = useT();
 
   // Load history once on mount.
   useEffect(() => {
@@ -80,6 +83,7 @@ export default function ChatPage() {
   }, []);
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
+  const { state: caseState, stale, send: sendEvent } = useCaseState(activeId);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -103,7 +107,7 @@ export default function ChatPage() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages }),
+        body: JSON.stringify({ messages: nextMessages, conversationId: active.id, locale }),
       });
       const data = await res.json();
       const reply = data.reply || "Nothing came back. Try again.";
@@ -198,6 +202,10 @@ export default function ChatPage() {
                   <ReplyBlocks
                     blocks={parseBlocks(m.content).blocks}
                     crisis={Boolean(active?.crisis)}
+                    conversationId={active?.id ?? ""}
+                    messageIndex={i}
+                    caseState={caseState}
+                    onEvent={sendEvent}
                   />
                 </>
               )}
@@ -210,6 +218,12 @@ export default function ChatPage() {
           )}
           <div ref={bottomRef} />
         </div>
+
+        {stale && (
+          <p className="text-xs mb-2" style={{ color: "var(--danger)" }}>
+            {t("state.stale")}
+          </p>
+        )}
 
         <div className="flex gap-2">
           <input

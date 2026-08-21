@@ -8,11 +8,17 @@ import { detectCrisis } from "@/lib/safety/detector";
 import { buildCrisisReply } from "@/lib/safety/respond";
 import { routeKnowledge } from "@/lib/knowledge/router";
 import { buildMaterialRules } from "@/lib/knowledge/materialRules";
+import { deriveCase, type CaseState } from "@/lib/interaction/reducer";
+import { buildInteractionContext } from "@/lib/interaction/context";
+import type { StoredEvent } from "@/lib/interaction/events";
+import { LOCALE_NAME, isLocale } from "@/lib/i18n";
 
 export const maxDuration = 60;
 
 interface ChatRequestBody {
   messages: { role: "user" | "assistant"; content: string }[];
+  conversationId?: string;
+  locale?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -77,6 +83,31 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ reply, configured: true, crisis: true });
   }
 
+  // Interaction state: what the user has actually DONE, not what they said.
+  // Without this the model re-assigns work they already completed, which is
+  // the fastest way to feel like it is not listening.
+  let interactionContext = "";
+  if (supabase && userId && body.conversationId) {
+    const { data } = await supabase
+      .from("interaction_events")
+      .select("id, conversation_id, payload, case_version, created_at")
+      .eq("conversation_id", body.conversationId)
+      .order("created_at", { ascending: true })
+      .limit(500);
+
+    if (data?.length) {
+      const events: StoredEvent[] = data.map((r) => ({
+        id: r.id,
+        conversationId: r.conversation_id,
+        event: r.payload,
+        caseVersion: r.case_version,
+        createdAt: r.created_at,
+      }));
+      const state: CaseState = deriveCase(events);
+      interactionContext = buildInteractionContext(state);
+    }
+  }
+
   const memoryBlock = await loadMemory(supabase, userId);
 
   // Only surface unfinished business at the start of a conversation. Raising
@@ -91,7 +122,20 @@ export async function POST(req: NextRequest) {
   const materialRules = buildMaterialRules(routed.chunks);
 
   const conversation: AiMessage[] = [
-    { role: "system", content: buildSystemPrompt(routed.block, memoryBlock, followUps, materialRules) },
+    {
+      role: "system",
+      content: buildSystemPrompt(
+        routed.block,
+        memoryBlock,
+        followUps,
+        materialRules,
+        interactionContext,
+        // Explicit rather than left for the model to infer from recent
+        // messages. Structured blocks made implicit detection unreliable —
+        // short JSON string values give it much less to go on than prose did.
+        isLocale(body.locale) ? LOCALE_NAME[body.locale] : ""
+      ),
+    },
     ...body.messages.map((m) => ({ role: m.role, content: m.content }) as AiMessage),
   ];
 

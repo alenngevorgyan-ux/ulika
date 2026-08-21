@@ -5,6 +5,10 @@ import Link from "next/link";
 import type { ReplyBlock } from "@/lib/mentalist/blocks";
 import { getBrowserSupabase } from "@/lib/supabase/client";
 import { GRADE_VAR, LiveTimerRing, Stamp, useReducedMotion } from "./primitives";
+import { deriveBlockId } from "@/lib/mentalist/blockIds";
+import type { CaseState } from "@/lib/interaction/reducer";
+import type { InteractionEvent } from "@/lib/interaction/events";
+import { useT } from "@/lib/i18n/useT";
 
 /**
  * Renders a structured reply.
@@ -18,27 +22,54 @@ import { GRADE_VAR, LiveTimerRing, Stamp, useReducedMotion } from "./primitives"
 export default function ReplyBlocks({
   blocks,
   crisis = false,
+  conversationId = "",
+  messageIndex = 0,
+  caseState,
+  onEvent,
 }: {
   blocks: ReplyBlock[];
   crisis?: boolean;
+  conversationId?: string;
+  messageIndex?: number;
+  caseState?: CaseState;
+  onEvent?: (e: InteractionEvent, optimistic?: (s: CaseState) => CaseState) => void;
 }) {
   return (
     <div className="space-y-6">
-      {blocks.map((b, i) => (
-        <Block key={i} block={b} index={i} crisis={crisis} />
-      ))}
+      {blocks.map((b, i) => {
+        // Derived from content, so a legacy message with no stored id gets a
+        // stable one on first render — no migration, no backfill.
+        const blockId = deriveBlockId(conversationId, messageIndex, i, b);
+        return (
+          <Block
+            key={blockId}
+            blockId={blockId}
+            block={b}
+            index={i}
+            crisis={crisis}
+            caseState={caseState}
+            onEvent={onEvent}
+          />
+        );
+      })}
     </div>
   );
 }
 
 function Block({
   block,
+  blockId,
   index,
   crisis,
+  caseState,
+  onEvent,
 }: {
   block: ReplyBlock;
+  blockId: string;
   index: number;
   crisis: boolean;
+  caseState?: CaseState;
+  onEvent?: (e: InteractionEvent, optimistic?: (s: CaseState) => CaseState) => void;
 }) {
   const reduced = useReducedMotion();
   const stagger = crisis || reduced ? 0 : index * 70;
@@ -66,7 +97,15 @@ function Block({
     case "source":
       return wrap(<SourceCard block={block} />);
     case "checklist":
-      return wrap(<Checklist block={block} crisis={crisis} />);
+      return wrap(
+        <Checklist
+          block={block}
+          blockId={blockId}
+          crisis={crisis}
+          caseState={caseState}
+          onEvent={onEvent}
+        />
+      );
     case "drill":
       return wrap(<Drill block={block} crisis={crisis} />);
     case "envelope":
@@ -194,53 +233,73 @@ function PatternCard({ block }: { block: Extract<ReplyBlock, { type: "pattern" }
   );
 }
 
-async function recordTick(skillId: string, item: string, checked: boolean) {
-  const supabase = getBrowserSupabase();
-  if (!supabase) return;
-  const { data } = await supabase.auth.getUser();
-  if (!data.user) return;
-  await supabase.from("training_responses").insert({
-    user_id: data.user.id,
-    skill_id: skillId,
-    prompt: item,
-    response: checked ? "done" : "unchecked",
-    block_id: `checklist:${item.slice(0, 60)}`,
-    checked,
-  });
-}
-
+/**
+ * Checklist — the vertical slice that proves the architecture.
+ *
+ * Tick state comes from CaseState, not from local useState. That is the whole
+ * difference: local state dies on reload and the model never learns about it,
+ * whereas this round-trips through the event log and reaches the next AI turn.
+ */
 function Checklist({
   block,
+  blockId,
   crisis,
+  caseState,
+  onEvent,
 }: {
   block: Extract<ReplyBlock, { type: "checklist" }>;
+  blockId: string;
   crisis: boolean;
+  caseState?: CaseState;
+  onEvent?: (e: InteractionEvent, optimistic?: (s: CaseState) => CaseState) => void;
 }) {
-  const [done, setDone] = useState<Record<number, boolean>>({});
+  const { t } = useT();
+  const ticks = caseState?.checklists[blockId] ?? {};
+
+  function toggle(itemIndex: number, checked: boolean) {
+    onEvent?.(
+      { type: "CHECKLIST_TOGGLED", blockId, itemIndex, checked },
+      // Optimistic: the box moves now. A checkbox that waits for a round-trip
+      // reads as broken even when it is working.
+      (s) => ({
+        ...s,
+        checklists: {
+          ...s.checklists,
+          [blockId]: { ...(s.checklists[blockId] ?? {}), [itemIndex]: checked },
+        },
+      })
+    );
+  }
 
   return (
-    <div className="rounded-lg border p-5" style={{ background: "var(--panel)", borderColor: "var(--line)" }}>
-      <Label>Away from this screen</Label>
+    <div
+      className="rounded-lg border p-5"
+      style={{ background: "var(--panel)", borderColor: "var(--line)" }}
+    >
+      <Label>{t("block.awayFromScreen")}</Label>
       <p className="text-sm mb-4">{block.title}</p>
       <div className="space-y-2.5">
-        {block.items.map((item, i) => (
-          <label key={i} className="flex gap-3 items-start cursor-pointer">
-            <Stamp trigger={done[i]} disabled={crisis}>
-              <input
-                type="checkbox"
-                checked={Boolean(done[i])}
-                onChange={(e) => {
-                  setDone((d) => ({ ...d, [i]: e.target.checked }));
-                  void recordTick(block.skillId, item, e.target.checked);
-                }}
-                className="mt-0.5 accent-[var(--accent-brass)]"
-              />
-            </Stamp>
-            <span className={`text-sm leading-relaxed ${done[i] ? "text-muted line-through" : ""}`}>
-              {item}
-            </span>
-          </label>
-        ))}
+        {block.items.map((item, i) => {
+          const checked = Boolean(ticks[i]);
+          return (
+            <label key={i} className="flex gap-3 items-start cursor-pointer">
+              <Stamp trigger={checked} disabled={crisis}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => toggle(i, e.target.checked)}
+                  aria-label={t("a11y.checkbox")}
+                  className="mt-0.5 accent-[var(--accent-brass)]"
+                />
+              </Stamp>
+              <span
+                className={`text-sm leading-relaxed ${checked ? "text-muted line-through" : ""}`}
+              >
+                {item}
+              </span>
+            </label>
+          );
+        })}
       </div>
     </div>
   );

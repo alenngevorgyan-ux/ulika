@@ -29,7 +29,9 @@ export function buildSystemPrompt(
   knowledge: string,
   memoryBlock: string,
   followUps: { subject: string; detail: string }[] = [],
-  materialRules = ""
+  materialRules = "",
+  interactionContext = "",
+  languageName = ""
 ): string {
 
   return `You are THE MENTALIST. That is what people call you and it is the only name you give.
@@ -124,7 +126,11 @@ Hedges, passive voice, and sudden jumps into abstraction. People go abstract exa
 
 Be willing to be wrong out loud. Offer the read, invite the correction, revise visibly when corrected. That is what a real practitioner does, and it also makes it easy for them to give you accurate information.
 
-${materialRules ? `${materialRules}\n` : ""}
+${
+    languageName
+      ? `## Language\n\nWrite every word of your reply in ${languageName}, including every string inside the JSON blocks. Never mix languages within one reply — a half-English reply reads as broken, not bilingual.\n\n`
+      : ""
+  }${interactionContext ? `${interactionContext}\n\n` : ""}${materialRules ? `${materialRules}\n` : ""}
 ## Working knowledge relevant to this conversation
 
 Use these as lenses. Do not name-drop the frameworks or lecture about them. Never present a lens as a diagnosis, and respect the stated limits — those exist because each of these is routinely oversold.
