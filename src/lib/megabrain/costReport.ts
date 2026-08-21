@@ -1,6 +1,7 @@
 import { costOf, modelFor, resolveConfiguration, MODELS, type ModelSpec } from "./modelRouter";
 import { MAX_OUTPUT_TOKENS } from "./engine";
 import { MODE_CAPS, RESERVATION_SAFETY_MARGIN } from "./costLedger";
+import { MODES, type AnalysisMode } from "./analysisMode";
 
 /**
  * The single canonical cost calculation.
@@ -29,6 +30,8 @@ export const PROMPT_CHARS = {
   strategise: 5200 + 7000, // stage prompt + serialised state so far
   baseline: 2400 + 4500,
   judge: 1200 + 13000, // judge instructions + two full answers
+  light: 2200 + 4500, // short prompt + the account
+  critic: 3400 + 6000, // critic instructions + the compact plan and facts
 } as const;
 
 /** Typical output as a fraction of the ceiling. Forecast only, never reserved. */
@@ -61,7 +64,7 @@ const sum = (bounds: Bound[]): Bound => ({
 });
 
 /** A. Product runtime: what one Standard case costs the product. Engine only. */
-export function engineCost(configId: string): Bound {
+export function engineCost(configId?: string): Bound {
   const cfg = resolveConfiguration(configId);
   if (cfg.pipeline === "two-stage") {
     return sum([
@@ -96,7 +99,7 @@ export interface BenchmarkCost {
 }
 
 /** B. Benchmark: engine + baseline + judge for one case. */
-export function benchmarkCost(configId: string): BenchmarkCost {
+export function benchmarkCost(configId?: string): BenchmarkCost {
   const engine = engineCost(configId);
   const baseline = baselineCost(configId);
   const judge = judgeCost(configId);
@@ -118,7 +121,27 @@ export const scale = (b: Bound, n: number): Bound => ({
  * rather than allowed to overrun. Retries are therefore best-effort, not
  * guaranteed — that is stated here and in the docs rather than implied.
  */
-export function fitsStandardCap(configId: string): { fits: boolean; reservedUsd: number; capUsd: number } {
+/**
+ * Per-mode projection, for the dry run and for the lab's pre-flight display.
+ *
+ * Light is one call and is priced as one call, not as a discounted pipeline.
+ * Deep is priced so the interface can show a number, and is flagged unavailable
+ * so nobody reads that number as an offer.
+ */
+export function modeCost(mode: AnalysisMode, configId?: string): Bound & { available: boolean; capUsd: number; maxModelCalls: number } {
+  const cfg = resolveConfiguration(configId);
+  const spec = modelFor(cfg, "strategise");
+  const shape =
+    mode === "light"
+      ? call(spec, PROMPT_CHARS.light, MAX_OUTPUT_TOKENS.light, false)
+      : mode === "strong"
+        ? sum([engineCost(configId), call(spec, PROMPT_CHARS.critic, MAX_OUTPUT_TOKENS.critic, false)])
+        : engineCost(configId);
+  const m = MODES[mode];
+  return { ...shape, available: m.available, capUsd: m.capUsd, maxModelCalls: m.maxModelCalls };
+}
+
+export function fitsStandardCap(configId?: string): { fits: boolean; reservedUsd: number; capUsd: number } {
   const { reservedUsd } = engineCost(configId);
   return { fits: reservedUsd <= MODE_CAPS.standard, reservedUsd, capUsd: MODE_CAPS.standard };
 }

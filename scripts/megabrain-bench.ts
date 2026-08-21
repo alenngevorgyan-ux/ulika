@@ -2,10 +2,10 @@ import "./_load-env";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONFIGURATIONS, resolveConfiguration } from "../src/lib/megabrain/modelRouter";
+import { CONFIGURATIONS, DEFAULT_CONFIGURATION, resolveConfiguration } from "../src/lib/megabrain/modelRouter";
 import { MODELS } from "../src/lib/megabrain/modelRouter";
 import { MODE_CAPS, CostLedger, AccountingError } from "../src/lib/megabrain/costLedger";
-import { benchmarkCost, fitsStandardCap, scale } from "../src/lib/megabrain/costReport";
+import { benchmarkCost, fitsStandardCap, modeCost, scale } from "../src/lib/megabrain/costReport";
 import { renderAnalysis, runBaseline, runCase } from "../src/lib/megabrain/engine";
 import { engineCost } from "../src/lib/megabrain/costReport";
 import { createOpenRouterTransport } from "../src/lib/megabrain/transport";
@@ -39,7 +39,10 @@ const value = (name: string, fallback?: string) => {
 
 const LIVE = flag("live");
 const ENGINE_ONLY = flag("engine-only");
-const CONFIG_ID = value("config", "cheap-extract-sonnet")!;
+// Follows DEFAULT_CONFIGURATION rather than repeating a slug: the default moved
+// to grok-matched and this string stayed on Sonnet, so every dry run priced a
+// configuration nobody intends to use.
+const CONFIG_ID = value("config", DEFAULT_CONFIGURATION)!;
 const LIMIT = Number(value("limit", "5"));
 const MAX_USD = Number(value("max-usd", "0"));
 const OUT_DIR = fileURLToPath(new URL("../bench", import.meta.url));
@@ -74,6 +77,15 @@ async function dryRun() {
     const t = scale(b.total, n);
     console.log(`  ${String(n).padStart(5)}   ${usd(t.expectedUsd).padEnd(11)} ${usd(t.reservedUsd).padEnd(11)} ${usd(t.absoluteUsd)}`);
   }
+  console.log("\nC. MODES — what a user actually picks\n");
+  for (const m of ["light", "standard", "strong", "deep"] as const) {
+    const c = modeCost(m, CONFIG_ID);
+    console.log(
+      `  ${m.padEnd(9)} expected ${usd(c.expectedUsd)}  reserved ${usd(c.reservedUsd)}  cap $${c.capUsd.toFixed(2)}  ` +
+        `<=${c.maxModelCalls} calls  ${c.available ? (c.reservedUsd <= c.capUsd ? "fits" : "OVER CAP") : "DISABLED"}`
+    );
+  }
+
   console.log(`\nBaseline used in the smoke: ${SMOKE_BASELINE} (current-production baseline defined but not run).`);
   console.log(`Frozen cases available: ${FROZEN_CASES.length}. Graders run offline; only the judge needs the network.`);
 }

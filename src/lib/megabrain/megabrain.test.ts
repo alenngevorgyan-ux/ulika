@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { RunRecorder, describeFailure } from "./runRecorder";
+import { checkLanguage, detectLanguage, resolveLanguage } from "./language";
+import { GOOD_ANALYSIS_EN, GOOD_RENDER_EN } from "./evals/fixtures";
 import { partialArtifact, writeArtifact, ArtifactRefused } from "./artifact";
 import { engineCost } from "./costReport";
 import { ProviderHttpError } from "./transport";
@@ -10,10 +12,12 @@ import { join } from "node:path";
 import {
   validateFrame, validateHypotheses, validatePlan, validateStrategies,
   validateActors, validateLeverage, validateCountermoves, MIN_HYPOTHESES,
+  MIN_EXACT_PHRASES, MIN_IF_THEN_BRANCHES,
 } from "./schemas";
 import { CostLedger, MODE_CAPS, BudgetExceededError, AccountingError, assertUsableCost, RESERVATION_SAFETY_MARGIN, LEDGER_FIELDS, readUsage, projectPipelineCost } from "./costLedger";
 import { MODELS, CONFIGURATIONS, costOf, estimateTokens, modelFor, resolveConfiguration, SMOKE_BASELINE, type BaselineKind } from "./modelRouter";
-import { runCase, runBaseline, renderAnalysis, MAX_OUTPUT_TOKENS, StageRejectedError } from "./engine";
+import { runCase, runBaseline, runLight, runStrong, runAnalysis, renderAnalysis, MAX_OUTPUT_TOKENS, StageRejectedError } from "./engine";
+import { capFor, MODES, ModeNotAvailable, recommendMode } from "./analysisMode";
 import { parseJsonReply, readTelemetry, type CompletionRequest } from "./transport";
 import { FROZEN_CASES } from "./evals/cases";
 import { gradeAnswer, summarise } from "./evals/graders";
@@ -1080,6 +1084,213 @@ describe("the benchmark configuration compares like with like", () => {
   it("fits a Standard case and leaves room", () => {
     const e = engineCost("grok-matched");
     expect(e.reservedUsd).toBeLessThan(MODE_CAPS.standard * 0.5);
+  });
+});
+
+describe("language is resolved, enforced, and separate from jurisdiction", () => {
+  it("detects Russian despite English loanwords", () => {
+    expect(detectLanguage("Руководитель сказал, что performance review будет через месяц")).toBe("ru");
+    expect(detectLanguage("The deadline is Friday. Дедлайн в пятницу.")).toBe("ru");
+  });
+  it("detects English", () => {
+    expect(detectLanguage("My manager presented the project without mentioning me.")).toBe("en");
+  });
+  it("lets an explicit choice override detection", () => {
+    expect(resolveLanguage("ru", "pure english text here and nothing else")).toBe("ru");
+    expect(resolveLanguage("en", "полностью русский текст без единого латинского слова")).toBe("en");
+  });
+  it("answers a Russian account in Russian", async () => {
+    const r = await runCase({ account: FROZEN_CASES[0].account }, fixtureTransport({}));
+    expect(r.analysis.language).toBe("ru");
+  });
+  it("rejects a plan that came back in the wrong language", async () => {
+    // The exact live failure: Russian account, English answer.
+    await expect(
+      runCase({ account: FROZEN_CASES[0].account }, fixtureTransport({ wrongLanguage: true }))
+    ).rejects.toThrow(/language\.wrongLanguage/);
+  });
+  it("does not fail on proper nouns and short quotations", () => {
+    const check = checkLanguage(GOOD_ANALYSIS, "ru");
+    expect(check.ok).toBe(true);
+  });
+  it("never infers jurisdiction from language", async () => {
+    const ru = await runCase({ account: FROZEN_CASES[0].account }, fixtureTransport({}));
+    expect(ru.analysis.jurisdiction.country).toBe("unknown");
+    const withJur = await runCase(
+      { account: FROZEN_CASES[0].account, jurisdiction: { country: "AM" } },
+      fixtureTransport({})
+    );
+    // Russian language, Armenian jurisdiction: the pairing must be possible.
+    expect(withJur.analysis.language).toBe("ru");
+    expect(withJur.analysis.jurisdiction.country).toBe("AM");
+  });
+  it("tells the model that an unknown jurisdiction forbids legal conclusions", async () => {
+    const calls: CompletionRequest[] = [];
+    await runCase({ account: "x" }, fixtureTransport({ spy: calls }));
+    expect(calls[2].system).toContain("Jurisdiction: NOT KNOWN");
+  });
+  it("warns that US without a state is not enough", async () => {
+    const calls: CompletionRequest[] = [];
+    await runCase({ account: "x", jurisdiction: { country: "US" } }, fixtureTransport({ spy: calls }));
+    expect(calls[2].system).toContain("differs by state");
+  });
+});
+
+describe("graders score the same content identically in either language", () => {
+  const c = FROZEN_CASES[0];
+  it("gives the same anti-banality verdict for the RU and EN twins", () => {
+    const ru = gradeAnswer(c, GOOD_RENDER, GOOD_ANALYSIS);
+    const en = gradeAnswer(c, GOOD_RENDER_EN, GOOD_ANALYSIS_EN);
+    const axis = (r: typeof ru) => r.quality.find((q) => q.axis === "anti_banality")!.score;
+    expect(axis(en)).toBe(axis(ru));
+  });
+  it("passes the same gates for both", () => {
+    const ru = gradeAnswer(c, GOOD_RENDER, GOOD_ANALYSIS);
+    const en = gradeAnswer(c, GOOD_RENDER_EN, GOOD_ANALYSIS_EN);
+    expect(en.gates.map((g) => g.passed)).toEqual(ru.gates.map((g) => g.passed));
+  });
+  it("reads signals from structure, not from Russian or English words", () => {
+    const note = gradeAnswer(c, GOOD_RENDER_EN, GOOD_ANALYSIS_EN).quality
+      .find((q) => q.axis === "anti_banality")!.note;
+    expect(note).toMatch(/ifThenBranches>=3/);
+  });
+});
+
+describe("semantic honesty is enforced, not requested", () => {
+  it("refuses a documentedFact built from the user saying they have evidence", async () => {
+    await expect(runCase({ account: "x" }, fixtureTransport({ documentedFactsLeak: true })))
+      .rejects.toThrow(/documentedFactsNotPermitted/);
+  });
+  it("keeps a claim about Git history as reported, not reviewed", async () => {
+    const r = await runCase({ account: FROZEN_CASES[0].account }, fixtureTransport({}));
+    expect(r.analysis.frame.documentedFacts).toEqual([]);
+    const evidence = r.analysis.frame.reportedEvidenceAvailable;
+    expect(evidence.length).toBeGreaterThan(0);
+    expect(evidence.every((e) => e.verificationStatus === "not_reviewed")).toBe(true);
+  });
+  it("rejects an actor given a personality with no supporting fact", async () => {
+    await expect(runCase({ account: "x" }, fixtureTransport({ inventedActor: true })))
+      .rejects.toThrow(/reportedWithoutFacts/);
+  });
+  it("accepts unknown for an actor barely mentioned", () => {
+    const director = GOOD_ANALYSIS.actors.actors.find((a) => a.label === "Директор")!;
+    expect(director.goals[0].basis).toBe("unknown");
+    expect(director.goals[0].value).toBe("unknown");
+  });
+  it("rejects an inferred claim with no uncertainty", () => {
+    const bad = { actors: [{ label: "X", goals: [{ value: "g", basis: "inferred", supportingFactIds: [] }], fears: [], resources: [], authority: { value: "unknown", basis: "unknown", supportingFactIds: [] }, dependencies: [], likelyReactions: [] }] };
+    expect(validateActors(bad, GOOD_ANALYSIS.frame).problems.some((p) => p.includes("inferredWithoutUncertainty"))).toBe(true);
+  });
+  it("strips a placeholder redirect to null", async () => {
+    const r = await runCase({ account: "x" }, fixtureTransport({ redirectPlaceholders: true }));
+    expect(r.analysis.strategies.strategies.every((st) => st.redirect === undefined)).toBe(true);
+  });
+  it("keeps a genuine redirect", () => {
+    const real = GOOD_ANALYSIS.strategies.strategies.find((st) => st.redirect);
+    expect(real!.redirect!.category).toBe("reputational_pressure");
+    expect(validateStrategies(GOOD_ANALYSIS.strategies).value!.strategies.filter((st) => st.redirect)).toHaveLength(1);
+  });
+  it("requires three distinct exact phrases", async () => {
+    await expect(runCase({ account: "x" }, fixtureTransport({ oneExactPhrase: true })))
+      .rejects.toThrow(/exactWords\.tooFew/);
+    expect(MIN_EXACT_PHRASES).toBe(3);
+  });
+  it("requires three if/then branches", () => {
+    expect(MIN_IF_THEN_BRANCHES).toBe(3);
+    expect(validatePlan({ ...GOOD_ANALYSIS.plan, ifThenBranches: [] }).problems)
+      .toContain("plan.ifThenBranches.tooFew");
+  });
+  it("requires all ten leverage kinds", () => {
+    expect(validateLeverage(GOOD_ANALYSIS.leverage).ok).toBe(true);
+    expect(GOOD_ANALYSIS.leverage.points).toHaveLength(10);
+  });
+});
+
+describe("analysis modes are bounded and cannot be widened from outside", () => {
+  it("runs Light in exactly one model call", async () => {
+    const calls: CompletionRequest[] = [];
+    const r = await runLight({ account: FROZEN_CASES[0].account }, fixtureTransport({ spy: calls }));
+    expect(calls).toHaveLength(1);
+    expect(r.plan.nextMove.length).toBeGreaterThan(0);
+    expect(r.plan.oneExactPhrase.length).toBeGreaterThan(0);
+  });
+
+  it("does not give Light a case frame it did not pay for", async () => {
+    const r = await runLight({ account: "x" }, fixtureTransport({}));
+    // Five fields, plus the two resolved settings. No actors, no hypotheses.
+    expect(Object.keys(r.plan).sort()).toEqual([
+      "jurisdiction", "language", "nextMove", "oneExactPhrase", "oneQuestion", "oneRisk", "shortAssessment",
+    ]);
+  });
+
+  it("runs Standard in three calls and Strong in four", async () => {
+    const std: CompletionRequest[] = [];
+    await runCase({ account: "x" }, fixtureTransport({ spy: std }));
+    expect(std).toHaveLength(3);
+
+    const strong: CompletionRequest[] = [];
+    await runStrong({ account: "x" }, fixtureTransport({ spy: strong }));
+    expect(strong).toHaveLength(4);
+  });
+
+  it("keeps the Standard plan when the critic pass fails", async () => {
+    // A failed revision is not a failed case: the Standard plan was already
+    // valid, and discarding it would make Strong strictly worse than Standard.
+    const r = await runStrong({ account: "x" }, fixtureTransport({ criticGarbage: true }));
+    expect(r.analysis.plan.exactWords.length).toBeGreaterThanOrEqual(3);
+    expect(r.problems.some((p) => p.startsWith("critic.rejected"))).toBe(true);
+  });
+
+  it("never loops the critic", async () => {
+    const calls: CompletionRequest[] = [];
+    await runStrong({ account: "x" }, fixtureTransport({ spy: calls, criticGarbage: true }));
+    // Three engine calls plus exactly one critic attempt, even when it fails.
+    expect(calls).toHaveLength(4);
+  });
+
+  it("refuses Deep instead of quietly running Standard", async () => {
+    const calls: CompletionRequest[] = [];
+    await expect(
+      runAnalysis({ account: "x", analysisMode: "deep" }, fixtureTransport({ spy: calls }))
+    ).rejects.toThrow(ModeNotAvailable);
+    // Zero transport calls: nothing was charged for a mode that does not exist.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reports MODE_NOT_AVAILABLE as a code, not a message to parse", async () => {
+    try {
+      await runAnalysis({ account: "x", analysisMode: "deep" }, fixtureTransport({}));
+    } catch (e) {
+      expect((e as ModeNotAvailable).code).toBe("MODE_NOT_AVAILABLE");
+    }
+  });
+
+  it("cannot have its cap raised by a client-supplied number", () => {
+    // Only ever lowered. A bigger number from outside is ignored.
+    expect(capFor("light", 5)).toBe(MODES.light.capUsd);
+    expect(capFor("standard", 99)).toBe(MODES.standard.capUsd);
+    expect(capFor("strong", 0.02)).toBe(0.02);
+  });
+
+  it("keeps mode caps at the agreed numbers", () => {
+    expect(MODES.light.capUsd).toBe(0.02);
+    expect(MODES.standard.capUsd).toBe(0.05);
+    expect(MODES.strong.capUsd).toBe(0.1);
+    expect(MODES.deep.capUsd).toBe(0.15);
+    expect(MODES.deep.available).toBe(false);
+  });
+
+  it("recommends a mode but never selects it", () => {
+    const r = recommendMode({ account: "Короткий вопрос про одного человека." });
+    expect(r.recommended).toBe("light");
+    const hard = recommendMode({
+      account: "x".repeat(1000),
+      actorCountHint: 4, unknownsHint: 5, irreversibleHint: true, retaliationHint: true,
+    });
+    expect(hard.recommended).toBe("strong");
+    expect(hard.factors.length).toBeGreaterThanOrEqual(3);
+    // A recommendation, and nothing more: it carries no side effect.
+    expect(Object.keys(hard).sort()).toEqual(["factors", "reason", "recommended"]);
   });
 });
 

@@ -363,6 +363,8 @@ interface FixtureOptions {
   oneExactPhrase?: boolean;
   /** Give an actor a personality with no basis. */
   inventedActor?: boolean;
+  /** Make the critic pass return something unusable. */
+  criticGarbage?: boolean;
   /**
    * Return a cost field that is wrong in a specific way, from the first call.
    * Wrapped in an object so that `{ value: undefined }` — a MISSING cost, which
@@ -523,6 +525,10 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
     if (name === "case_plan") {
       if (opts.failAtStrategise) throw new ProviderHttpError(404, req.modelSlug, "404");
       strategiseCalls++;
+      // The critic reuses the plan schema; the second such call is the revision.
+      if (opts.criticGarbage && strategiseCalls > 1) {
+        return withModel(tamper({ content: "critique in prose", usage: usage(1800, 40), latencyMs: 900 }));
+      }
       if (opts.strategiseGarbageFirst && strategiseCalls === 1) {
         return withModel(tamper({ content: "прошу прощения, вот текстом", usage: usage(1800, 30), latencyMs: 900 }));
       }
