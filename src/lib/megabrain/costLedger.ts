@@ -38,6 +38,8 @@ export interface LedgerEntry {
   outputTokens: number;
   latencyMs: number;
   estimatedCostUsd: number;
+  /** Monotonic across the whole tree, so allDeep() can order truthfully. */
+  seq: number;
   /** "provider" when the provider reported the charge; "table" when derived. */
   costSource: "provider" | "table";
   /** Dollars still available to the whole request when this call was made. */
@@ -57,6 +59,7 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
   "outputTokens",
   "latencyMs",
   "estimatedCostUsd",
+  "seq",
   "costSource",
   "requestBudgetUsd",
   "stoppedByBudgetGuard",
@@ -112,6 +115,9 @@ export class BudgetExceededError extends Error {
     this.name = "BudgetExceededError";
   }
 }
+
+/** Shared across a whole ledger tree, so ordering survives nesting. */
+let SEQ = 0;
 
 export class CostLedger {
   private readonly entries: LedgerEntry[] = [];
@@ -170,8 +176,12 @@ export class CostLedger {
    * `all()` on the command budget would show an empty ledger and a real bill.
    */
   allDeep(): LedgerEntry[] {
-    return [...this.entries, ...this.children.flatMap((c) => c.allDeep())].sort((a, b) =>
-      a.stage.localeCompare(b.stage)
+    // Sorted by sequence, which is what "chronological" has to mean once spend
+    // is spread across nested envelopes. An earlier version sorted by stage
+    // NAME while the comment claimed chronological order — the two agree only
+    // by accident, and here they did not.
+    return [...this.entries, ...this.children.flatMap((c) => c.allDeep())].sort(
+      (a, b) => a.seq - b.seq
     );
   }
 
@@ -208,6 +218,7 @@ export class CostLedger {
         latencyMs: 0,
         estimatedCostUsd: projectedUsd,
         costSource: "table",
+        seq: SEQ++,
         requestBudgetUsd: this.remainingUsd,
         stoppedByBudgetGuard: true,
       });
@@ -270,6 +281,7 @@ export class CostLedger {
         ? usage.actualCostUsd!
         : costOf(spec, usage.inputTokens, usage.outputTokens),
       costSource: fromProvider ? "provider" : "table",
+      seq: SEQ++,
       requestBudgetUsd: this.remainingUsd,
       stoppedByBudgetGuard: false,
     };

@@ -112,6 +112,25 @@ the one that already happened. Nothing here is a guarantee against a single
 overcharged request, and calling it one would be the false certainty this
 project keeps being audited for.
 
+### Substitution is prevented, not detected
+
+Every request sends `provider: { allow_fallbacks: false, require_parameters: true }`
+and a `max_price` pinned to the exact catalogue price, and never sends a `models`
+array. Detecting a model swap after the fact — all the accounting check can do —
+is strictly worse than making it impossible: by then the charge at the other
+model's price has already happened. The post-hoc check remains as a backstop.
+
+Provider error bodies are never surfaced. A provider error routinely quotes the
+offending request, and the request holds the user's account; only the HTTP status
+and a short enum-like error code are reported.
+
+### Required before any live run, and not optional
+
+A **separate OpenRouter key used only for the benchmark**, carrying a
+**per-key credit limit**. The margin below reduces the chance of an
+under-estimate; only a provider-side limit bounds the pathological case. This is
+external configuration and is the founder's to set.
+
 Reservations therefore carry a safety margin above the nominal table price.
 `max_tokens` bounds the completion, but whether it bounds every *billed* output
 token — reasoning included — is not something this repository can prove about a

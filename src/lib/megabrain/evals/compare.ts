@@ -149,6 +149,7 @@ export async function compareBlind(
     user,
     maxOutputTokens: 200,
     temperature: 0,
+    maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
   });
   ledger.record({
     stage: "judge",

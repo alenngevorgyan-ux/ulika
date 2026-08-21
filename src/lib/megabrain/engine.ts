@@ -108,6 +108,7 @@ async function stage(
       maxOutputTokens,
       jsonSchema,
       temperature: 0.6,
+      maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
     });
     // Throws AccountingError on a malformed cost, an overcharge or a routing
     // change. That stops the pipeline before the NEXT call; it cannot undo this
@@ -289,6 +290,7 @@ export async function runBaseline(
     user: input.account,
     maxOutputTokens: MAX_OUTPUT_TOKENS.baseline,
     temperature: 0.7,
+    maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
   });
   ledger.record({
     stage: "baseline",

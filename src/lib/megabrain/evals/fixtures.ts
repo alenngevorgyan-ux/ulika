@@ -173,6 +173,13 @@ interface FixtureOptions {
   reportedModel?: string;
   /** Report a charge far above what could have been reserved. */
   overcharge?: boolean;
+  /**
+   * Exact charge per stage. Used to drive a run toward a real cap without
+   * tripping the overcharge check — scaling every cost blindly exceeds the
+   * reservation and fails closed first, which is correct behaviour but tests
+   * something else.
+   */
+  stageCosts?: Partial<Record<"extract" | "analyse" | "strategise", number>>;
 }
 
 /**
@@ -206,9 +213,18 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
   return async (req): Promise<CompletionResult> => {
     opts.spy?.push(req);
     if (opts.callCount) opts.callCount.n++;
-    const tamper = <T extends { usage: unknown }>(r: T): T => {
+    const tamper = <T extends { usage: { actualCostUsd: number | null; rawCost: unknown } }>(r: T): T => {
       if (opts.brokenCost) return { ...r, usage: brokenUsage(opts.brokenCost.value) };
       if (opts.overcharge) return { ...r, usage: brokenUsage(9.99) };
+      const stage =
+        req.jsonSchema?.name === "case_extraction" ? "extract"
+        : req.jsonSchema?.name === "case_analysis" ? "analyse"
+        : req.jsonSchema?.name === "case_plan" ? "strategise"
+        : undefined;
+      const fixed = stage ? opts.stageCosts?.[stage] : undefined;
+      if (fixed !== undefined) {
+        return { ...r, usage: { ...r.usage, actualCostUsd: fixed, rawCost: fixed } };
+      }
       return r;
     };
     const withModel = <T extends object>(r: T): T =>

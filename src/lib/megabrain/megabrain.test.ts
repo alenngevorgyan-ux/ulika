@@ -188,24 +188,47 @@ describe("a benchmark budget never relaxes the engine budget", () => {
     expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
   });
 
-  it("refuses an engine retry that would cross $0.10, with $0.05 still free on the command budget", async () => {
-    // Measured, not guessed: spend after the first strategise attempt plus the
-    // exact reservation that attempt required.
-    const probeSpy: CompletionRequest[] = [];
-    const probe = new CostLedger("standard", 1);
-    await runCase({ account: "x", ledger: probe }, fixtureTransport({ strategiseGarbageFirst: true, spy: probeSpy }));
-    const engineChild = probe.all().length === 0;
-    expect(engineChild).toBe(true);
-
+  it("refuses an engine retry that would cross the real $0.10 Standard cap, with the $0.15 command budget still open", async () => {
+    // The regression test the previous version only claimed to be. That one
+    // used mode "quick" behind a $0.03 envelope, so it exercised the $0.02 cap,
+    // not Standard. This runs a genuine Standard case inside a genuine $0.15
+    // command budget, and drives real spend with scaled fixture charges until a
+    // retry would cross $0.10 while the command budget is still far from spent.
     const callCount = { n: 0 };
-    // Command budget deliberately generous; engine envelope deliberately tight.
     const benchmark = new CostLedger("standard", 0.15);
-    const tight = benchmark.envelope(0.03);
+
     await expect(
-      runCase({ account: "x", ledger: tight, mode: "quick" }, fixtureTransport({ strategiseGarbageFirst: true, callCount }))
+      runCase(
+        { account: "x", mode: "standard", ledger: benchmark },
+        // Each figure sits under its own stage reservation, so the run is
+        // stopped by the $0.10 envelope rather than by the overcharge check.
+        fixtureTransport({
+          strategiseGarbageFirst: true,
+          stageCosts: { extract: 0.003, analyse: 0.03, strategise: 0.045 },
+          callCount,
+        })
+      )
     ).rejects.toThrow(BudgetExceededError);
-    expect(benchmark.remainingUsd).toBeGreaterThan(0.05);
-    expect(callCount.n).toBeLessThan(4);
+
+    // The engine stopped at its own $0.10, not at the command's $0.15.
+    expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
+    expect(benchmark.remainingUsd).toBeGreaterThan(0.03);
+    // extract, analyse, one strategise attempt. The retry was never sent.
+    expect(callCount.n).toBe(3);
+  });
+
+  it("completes the same run when the spend stays clear of $0.10", async () => {
+    // The counterfactual, so the test above cannot pass for an unrelated
+    // reason. Identical run, identical retry, cheaper stages: it succeeds. The
+    // only difference is whether the retry crosses the Standard envelope.
+    const benchmark = new CostLedger("standard", 0.15);
+    await expect(
+      runCase(
+        { account: "x", mode: "standard", ledger: benchmark },
+        fixtureTransport({ strategiseGarbageFirst: true, stageCosts: { extract: 0.001, analyse: 0.004, strategise: 0.004 } })
+      )
+    ).resolves.toBeTruthy();
+    expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
   });
 
   it("does not let the baseline or judge borrow the engine's remainder", async () => {
@@ -850,6 +873,55 @@ describe("blind comparison cannot be gamed by position or format", () => {
       caseId: `c${i}`, winner: i < 13 ? ("engine" as const) : ("baseline" as const), reason: "", engineSide: "A" as const,
     }));
     expect(summariseComparisons(wins).passesThreshold).toBe(true);
+  });
+});
+
+describe("no substitution, and no leaked provider prose", () => {
+  it("forbids provider fallback and pins the price in every request", async () => {
+    const calls: CompletionRequest[] = [];
+    await runCase({ account: "x" }, fixtureTransport({ spy: calls }));
+    for (const c of calls) {
+      expect(c.maxPrice).toBeDefined();
+      expect(c.maxPrice!.promptPerMTok).toBeGreaterThan(0);
+    }
+    const src = readFileSync(join(process.cwd(), "src/lib/megabrain/transport.ts"), "utf8");
+    expect(src).toContain("allow_fallbacks: false");
+    expect(src).toContain("require_parameters: true");
+    expect(src).toContain("max_price");
+  });
+
+  it("never puts a provider response body into an error", () => {
+    const src = readFileSync(join(process.cwd(), "src/lib/megabrain/transport.ts"), "utf8");
+    // The old form interpolated res.text() into the message; a provider error
+    // routinely quotes the request, and the request holds the user's account.
+    // Narrow on purpose: transport.ts legitimately slices a `body` variable in
+    // the JSON reply parser. What must not exist is the provider's ERROR text
+    // reaching an Error message.
+    const errorPath = src.slice(src.indexOf("if (!res.ok)"), src.indexOf("const data = (await res.json())"));
+    expect(errorPath).not.toMatch(/res\.text\(\)/);
+    // Not a bare /body/ search: the comment right there contains "somebody's".
+    // What matters is that no response text is interpolated into the message.
+    expect(errorPath).not.toMatch(/\$\{\s*body/);
+    expect(errorPath).toContain("NO PROVIDER BODY");
+    // Only enum-like codes are ever extracted, never the provider's message.
+    expect(src).toContain("`message` is");
+    expect(src).not.toMatch(/error\?\.\s*message/);
+  });
+
+  it("the CLI does not run itself on import", () => {
+    const src = readFileSync(join(process.cwd(), "scripts/megabrain-bench.ts"), "utf8");
+    expect(src).toContain("isEntryPoint");
+    expect(src).toMatch(/if \(isEntryPoint\)/);
+  });
+});
+
+describe("the ledger reports what actually happened, in order", () => {
+  it("orders nested spend chronologically, not by stage name", async () => {
+    const benchmark = new CostLedger("standard", 1);
+    await runCase({ account: "x", ledger: benchmark }, fixtureTransport({}));
+    await runBaseline({ account: "x", ledger: benchmark.envelope(0.05) }, fixtureTransport({}));
+    const stages = benchmark.allDeep().map((e) => e.stage);
+    expect(stages).toEqual(["extract", "analyse", "strategise", "baseline"]);
   });
 });
 

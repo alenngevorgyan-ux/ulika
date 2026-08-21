@@ -1,7 +1,7 @@
 import "./_load-env";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONFIGURATIONS } from "../src/lib/megabrain/modelRouter";
 import { MODELS } from "../src/lib/megabrain/modelRouter";
 import { MODE_CAPS, CostLedger, AccountingError } from "../src/lib/megabrain/costLedger";
@@ -209,7 +209,22 @@ async function main() {
   return live();
 }
 
-main().catch((e) => {
+/**
+ * Only when this file is the process entry point.
+ *
+ * Without the guard, importing the module — a test, a tool, an editor's
+ * auto-import — executes main(), and with --live in argv that would spend money
+ * on import. The claim that this CLI is import-safe was made before the guard
+ * existed, which is exactly the kind of unearned assurance this project keeps
+ * finding.
+ */
+const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  main().catch(onError);
+}
+
+function onError(e: unknown) {
   if (e instanceof AccountingError) {
     // Deliberately terse. A provider error body can quote the request, and the
     // request contains the user's account.
@@ -219,4 +234,4 @@ main().catch((e) => {
   }
   console.error(e instanceof Error ? e.message : e);
   process.exit(1);
-});
+}

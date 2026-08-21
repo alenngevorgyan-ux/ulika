@@ -16,6 +16,8 @@ import { readUsage, type ProviderUsage } from "./costLedger";
 
 export interface CompletionRequest {
   modelSlug: string;
+  /** Ceiling prices per million tokens, sent to the provider as a hard bound. */
+  maxPrice?: { promptPerMTok: number; completionPerMTok: number };
   system: string;
   user: string;
   maxOutputTokens: number;
@@ -65,6 +67,36 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         signal: controller.signal,
         body: JSON.stringify({
           model: req.modelSlug,
+          /**
+           * No substitutions, at any level.
+           *
+           * `allow_fallbacks: false` stops OpenRouter routing to a different
+           * upstream provider for this model, and omitting a `models` array
+           * stops model-level fallback. Detecting a swap after the fact — which
+           * is all the accounting check can do — is strictly worse than making
+           * it impossible: by then the charge at the other model's price has
+           * already happened.
+           *
+           * `require_parameters` refuses a provider that would silently drop
+           * response_format, which would turn a structured stage into free text
+           * we then pay for and reject.
+           *
+           * `max_price` is the only ceiling the provider itself enforces. Set to
+           * the exact catalogue price, so a regional or provider markup is
+           * refused rather than billed.
+           */
+          provider: {
+            allow_fallbacks: false,
+            require_parameters: true,
+            ...(req.maxPrice
+              ? {
+                  max_price: {
+                    prompt: req.maxPrice.promptPerMTok,
+                    completion: req.maxPrice.completionPerMTok,
+                  },
+                }
+              : {}),
+          },
           messages: [
             { role: "system", content: req.system },
             { role: "user", content: req.user },
@@ -84,10 +116,12 @@ export function createOpenRouterTransport(apiKey: string): Transport {
       });
 
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        // Provider errors can quote the request. Truncate hard and never log the
-        // key, which is in the headers rather than the body but is worth saying.
-        throw new Error(`Provider ${res.status}: ${body.slice(0, 300)}`);
+        // NO PROVIDER BODY. A provider error message routinely quotes the
+        // offending request, and the request contains the user's account —
+        // which in this product is somebody's job, marriage or dispute. The
+        // status code and, when present, a short machine code are enough to
+        // act on; the prose is not worth the leak.
+        throw new Error(`Provider request failed (${res.status})${await errorCode(res)}`);
       }
 
       const data = (await res.json()) as {
@@ -107,6 +141,25 @@ export function createOpenRouterTransport(apiKey: string): Transport {
       clearTimeout(timer);
     }
   };
+}
+
+/**
+ * Extract only a short machine-readable code from an error response.
+ *
+ * Deliberately narrow: `code` and `type` are enum-like and safe, `message` is
+ * free text written by the provider about our request and is never read.
+ */
+async function errorCode(res: Response): Promise<string> {
+  try {
+    const data = (await res.json()) as { error?: { code?: unknown; type?: unknown } };
+    const parts = [data.error?.code, data.error?.type]
+      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+      .map((v) => String(v))
+      .filter((v) => v.length <= 40 && /^[\w.-]+$/.test(v));
+    return parts.length ? ` [${parts.join("/")}]` : "";
+  } catch {
+    return "";
+  }
 }
 
 /** Parse a model's JSON reply without letting a stray fence break the run. */
