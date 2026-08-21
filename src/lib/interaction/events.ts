@@ -1,14 +1,26 @@
 /**
  * Interaction events — the typed vocabulary of what a user can do to a block.
  *
- * Hand-rolled validation rather than a schema library. The vocabulary is nine
+ * Hand-rolled validation rather than a schema library. The vocabulary is ten
  * fixed shapes that change rarely; a library would add a runtime dependency to
  * a project that deliberately runs on five, to replace a function. Revisit if
  * this grows past ~20 event types or starts changing weekly.
  *
- * The validator is the SERVER'S whitelist. Anything not described here cannot
- * reach the reducer, which is what stops a compromised client — or a model
- * that decided to be creative — from writing arbitrary state.
+ * SCOPE OF THIS WHITELIST — read before relying on it.
+ *
+ * It validates SHAPE, not CONTENT. An event whose type is not listed here
+ * cannot reach the reducer, and a listed type with the wrong fields is
+ * rejected. That is the whole of the guarantee. Within a well-formed shape the
+ * client still chooses every value: `blockId` is any string up to 64 chars and
+ * is never checked against a real block, and `excerpt` is any string up to
+ * 1000 chars and is never checked against the message it claims to quote.
+ * Nothing server-side can currently perform those checks, because no message
+ * is stored server-side. See docs/interaction-engine-readiness-audit.md §3.4
+ * and §3.5.
+ *
+ * Declaring a shape here does NOT mean the UI can produce it. Nine of the ten
+ * have no emitter. src/lib/interaction/status.ts is the authoritative record
+ * of which is which, and a test enforces that it stays accurate.
  */
 
 export type InteractionEvent =

@@ -5,6 +5,29 @@ document to argue with before anything gets built.
 
 ---
 
+> **STATUS — THIS IS A PLAN, NOT A RECORD OF WHAT EXISTS.**
+>
+> Read it as intent. Everything below describes what was proposed on 2026-08-21;
+> a later independent audit found several of these guarantees were written into
+> code comments as though they had been built, when they had not.
+>
+> What is actually implemented, as of 2026-08-21, is:
+> **event foundation + checklist vertical slice.** That means: the typed event
+> whitelist, `/api/interaction`, the `interaction_events` table with RLS, the
+> pure reducer, the context builder and deterministic block IDs all exist — and
+> exactly one of the ten event types, `CHECKLIST_TOGGLED`, can be produced by
+> the UI. Its round-trip was confirmed once by hand and by no committed test.
+>
+> This is **not** "Phase 0/1 done". Of the constraints in §11, server-minted
+> block IDs were not built. Of the failure handling in §15, stale-action
+> rejection was not built. Phase 2 and beyond have not started.
+>
+> Per-event truth: `src/lib/interaction/status.ts`.
+> Gap analysis and the gate before Evidence Tray:
+> `docs/interaction-engine-readiness-audit.md`.
+
+---
+
 ## 1. Executive conclusion
 
 **Build the state layer, not the mechanics.** The brief lists roughly sixty
@@ -369,6 +392,8 @@ Three deliberate constraints:
 
 - **Block IDs are minted server-side.** A client-minted ID cannot be trusted as
   a reference target.
+  **NOT BUILT.** IDs are derived in the browser (`ReplyBlocks.tsx`) and the
+  server never re-derives or checks them. Audit §3.4.
 - **The LLM never mutates state directly.** It proposes semantic operations;
   the server validates against a whitelist; a pure reducer applies them. Per
   brief §119, and this is right.
@@ -477,6 +502,8 @@ This is the rule that decides whether the product is used in week three.
 - **Stale action** → every event carries the `caseVersion` it was created
   against; the server rejects mismatches and the UI says the case moved on
   rather than silently discarding.
+  **NOT BUILT.** The version is sent and stored, never compared; no 409 is ever
+  returned. The client-side handling exists and is unreachable. Audit §3.6.
 - **Double submit** → events idempotent by `(blockId, type)`; second write wins
   or is ignored per event type.
 - **Block crash** → an error boundary per block. A broken graph must not take

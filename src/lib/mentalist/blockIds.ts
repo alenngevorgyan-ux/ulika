@@ -17,9 +17,22 @@ import type { ReplyBlock } from "./blocks";
  * writing a test to detect it.
  *
  * FNV-1a is not cryptographic and does not need to be. It needs to be stable
- * across runtimes and collision-rare within one conversation. IDs are also
- * verified server-side by re-deriving them from the stored message, so a forged
- * id does not become a valid reference target.
+ * across runtimes and collision-rare within one conversation.
+ *
+ * NOT VERIFIED SERVER-SIDE. An earlier version of this comment claimed IDs were
+ * re-derived from the stored message on the server, so that a forged id could
+ * not become a valid reference target. No such code was ever written, and it
+ * could not be: the server has no copy of the message to re-derive from — chat
+ * history lives in the browser's localStorage only. /api/interaction accepts any
+ * non-empty string up to 64 chars as a blockId. A forged or another user's
+ * blockId is therefore accepted today; RLS still confines the row to the caller,
+ * so this is a broken reference, not a cross-user write.
+ *
+ * These IDs are also minted in the browser (ReplyBlocks.tsx), not server-side as
+ * docs/interaction-engine-plan.md §11 requires, and messageIndex is a position in
+ * the client's localStorage array — so any future edit or truncation of history
+ * silently re-points every later block. Tracked as P0 in
+ * docs/interaction-engine-readiness-audit.md §3.4.
  *
  * Cost: editing a block's text changes its id. Acceptable — the model produces
  * a block once and never edits it.

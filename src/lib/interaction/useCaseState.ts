@@ -5,12 +5,15 @@ import type { InteractionEvent } from "./events";
 import { emptyCase, type CaseState } from "./reducer";
 
 /**
- * Case state for one conversation: loads on mount, sends events, tracks
- * version for staleness.
+ * Case state for one conversation: loads on mount, sends events, tracks a
+ * version number.
  *
  * Optimistic locally, authoritative on the server. The tick appears instantly
- * because a checkbox that waits for a round-trip feels broken; the server's
- * version number is what everything else trusts.
+ * because a checkbox that waits for a round-trip feels broken.
+ *
+ * The version is NOT yet a staleness mechanism. It is a count of rows in the
+ * event log, it is sent to the server and ignored there, and the 409 branch
+ * below cannot fire. Audit §3.6-§3.7.
  */
 export function useCaseState(conversationId: string | null) {
   const [state, setState] = useState<CaseState>(emptyCase());
@@ -56,9 +59,13 @@ export function useCaseState(conversationId: string | null) {
         });
         const data = await res.json();
 
-        // The server rejected this as built against an older version of the
-        // case. Surfaced rather than swallowed: silently dropping a user's
-        // action is worse than telling them the case moved on.
+        // UNREACHABLE TODAY, kept deliberately. /api/interaction has no 409 path:
+        // it stores caseVersion without comparing it. This branch and the
+        // "state.stale" copy in both locales are the client half of a guarantee
+        // whose server half was never written — see
+        // docs/interaction-engine-readiness-audit.md §3.6. Left in place because
+        // it is correct behaviour for when the server side lands; do not read it
+        // as evidence that stale rejection works.
         if (res.status === 409) setStale(true);
         else if (typeof data?.caseVersion === "number") {
           setState((s) => ({ ...s, version: data.caseVersion }));

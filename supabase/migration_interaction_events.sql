@@ -13,8 +13,17 @@ create table if not exists public.interaction_events (
   -- Validated against a server-side whitelist before it ever gets here.
   event_type text not null,
   payload jsonb not null,
-  -- Optimistic-concurrency guard: an action created against an older case
-  -- version is rejected rather than silently applied out of order.
+  -- Recorded only. NOT a concurrency guard, despite what this comment used to
+  -- say: the API writes whatever version the client sent and never compares it
+  -- to the current one, so no request is ever rejected as stale and no 409 path
+  -- exists server-side. The client in useCaseState.ts already handles a 409 that
+  -- cannot currently arrive.
+  --
+  -- Nor is it a usable version even once compared: CaseState.version is derived
+  -- as the NUMBER OF ROWS in this log, so a deduped toggle replaces its row and
+  -- leaves the version unchanged across a real logical change. Fixing this needs
+  -- an authoritative version incremented in the same transaction as the insert.
+  -- See docs/interaction-engine-readiness-audit.md §3.6 and §3.7.
   case_version int not null default 0,
   -- Set for events that replace rather than accumulate (a checklist tick
   -- toggled twice is one row, last write wins). Null means append.
@@ -57,8 +66,10 @@ create index if not exists interaction_events_lookup_idx
 -- distinct: rows with dedupe_key null never collide, so appending events stay
 -- unlimited, while non-null keys are enforced unique.
 --
--- (Same class of bug as an expression index with onConflict. Caught here by an
--- acceptance test rather than in production, which is the point of the test.)
+-- (Same class of bug as an expression index with onConflict. Caught by a manual
+-- acceptance run on 2026-08-21 that was never committed and cannot be re-run;
+-- the route's ON CONFLICT fallback exists for deployments still carrying the old
+-- partial index. See docs/interaction-engine-readiness-audit.md §3.1.)
 drop index if exists public.interaction_events_dedupe_idx;
 create unique index if not exists interaction_events_dedupe_idx
   on public.interaction_events(user_id, conversation_id, dedupe_key);

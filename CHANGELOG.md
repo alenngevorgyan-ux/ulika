@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## 2026-08-21 (baseline correction) — naming the interaction work honestly
+
+No behaviour changed in this entry. It corrects the record, because the record
+was wrong in a way that would have cost the next piece of work.
+
+### The status is: event foundation + checklist vertical slice
+
+The interaction work committed earlier today (`6d60829`, `40ffa1a`) was labelled
+"Phase 0/1" — which reads as the plan's Phase 0 and Phase 1 being complete. They
+are not. What exists is:
+
+- the typed event whitelist, `/api/interaction`, the `interaction_events` table
+  with RLS and a dedupe index, a pure reducer, a context builder that reaches the
+  next AI turn, and deterministic block IDs — **the foundation**;
+- exactly **one** of ten event types reachable by a user, `CHECKLIST_TOGGLED` —
+  **one vertical slice**.
+
+Phase 0 also required server-minted block IDs; those were not built. Stale-event
+rejection — §15 of the plan, failure handling, not part of any phase row — was
+not built either, though the client half of it shipped. Phase 2 (conversations
+to the server) has not started.
+
+### Three comments asserted things that were never implemented
+
+Each of these described a defence that does not exist, which is worse than no
+comment, because the next person reads it and stops checking:
+
+- `src/lib/mentalist/blockIds.ts` claimed block IDs were "verified server-side by
+  re-deriving them from the stored message". No such code exists, and it cannot
+  exist yet — there is no stored server-side message to re-derive from. A forged
+  blockId is accepted today (RLS still confines the row to its owner, so this is
+  a broken reference, not a cross-user write).
+- `supabase/migration_interaction_events.sql` claimed an event built against an
+  older case version "is rejected rather than silently applied out of order".
+  Nothing compares versions; no 409 path exists.
+- `src/lib/interaction/events.ts` said the vocabulary was nine shapes. It is ten.
+
+Corrected in place, with the real behaviour stated and the audit section cited.
+The client's 409 branch and the `state.stale` copy are left as-is and marked
+unreachable — they are the correct client half of a server half nobody wrote.
+
+### Per-event status is now data, not prose
+
+`src/lib/interaction/status.ts` records, for each of the ten types, whether the
+UI can emit it (`wired` / `reserved`) and what tests actually prove (`unit` /
+`none`). A test in `interaction.test.ts` fails if the table drifts from the code.
+
+One row per type, and the honest summary is: **1 wired, 9 reserved, 0 with an
+automated round-trip.** Nothing in the suite touches the Route Handler, a
+database, RLS, or a rendered component — that much the repository proves.
+
+The manual round-trip referred to by commit `40ffa1a` is recorded as an external
+report, not as coverage: no artifact of it was committed, so it cannot be re-run
+or confirmed from this repository.
+
+The guard is a text scan and is documented as one. It catches the ordinary drift
+— a new emitter, a type quietly upgraded — and does not catch indirection, an
+emitter assembled at runtime, or which reducer branch a test actually reaches.
+That last gap is real and named: the `EVIDENCE_PINNED` re-pin branch is
+constructed by no test, and the table says so in words because no scan could.
+
+Full gap analysis and the gate before Evidence Tray:
+`docs/interaction-engine-readiness-audit.md`.
+
 ## 2026-08-21 (final) — Evidence highlight, reveal, hover
 
 Clicking an observation in /analyze selects the exact phrase in your pasted text

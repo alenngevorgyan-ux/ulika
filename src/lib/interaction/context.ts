@@ -69,6 +69,12 @@ export function buildInteractionContext(state: CaseState): string {
   // Completed actions are the whole point of this layer: without them the
   // model asks someone to do a thing they already did, which is the fastest
   // way to make it feel like it is not listening.
+  //
+  // KNOWN LIMITATION — the model gets a COUNT, not the content. `ticked` builds
+  // blockId#index references and only .length is used below, so the model is
+  // told "they completed 2 actions" and cannot tell item A from item B. The
+  // payload carries no item text and the server cannot resolve blockId back to
+  // text, because no message is stored server-side. Audit §3.2.
   const ticked = Object.entries(state.checklists).flatMap(([blockId, items]) =>
     Object.entries(items)
       .filter(([, checked]) => checked)

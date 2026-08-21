@@ -9,8 +9,16 @@ export const maxDuration = 15;
  * The only way an interaction reaches state.
  *
  * Everything arriving here is validated against the whitelist in events.ts
- * before it touches the database. An event shape that is not in that file
+ * before it touches the database. An event SHAPE that is not in that file
  * cannot be written, whatever the client or a creative model sends.
+ *
+ * What this handler does NOT do, so nobody builds on a guarantee that is not
+ * here (docs/interaction-engine-readiness-audit.md §3.4, §3.5, §3.6):
+ *   - it does not verify blockId against a real block — it cannot, no message
+ *     is stored server-side;
+ *   - it does not verify that an EVIDENCE_PINNED excerpt occurs in any message;
+ *   - it does not compare caseVersion, so it never returns 409.
+ * RLS is what keeps rows confined to their owner; none of the above is.
  */
 export async function POST(req: NextRequest) {
   const supabase = await getServerSupabase();
@@ -53,6 +61,8 @@ export async function POST(req: NextRequest) {
     conversation_id: conversationId,
     event_type: event.type,
     payload: event,
+    // Stored for forward compatibility, never compared. See the column comment
+    // in migration_interaction_events.sql for why it is not yet a real version.
     case_version: Number(body.caseVersion) || 0,
     dedupe_key: key,
   };

@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { validateEvent, dedupeKey, type StoredEvent } from "./events";
+import { EVENT_STATUS, WIRED_EVENTS } from "./status";
 import { deriveCase, deriveCaseAt, emptyCase, calibration } from "./reducer";
 import { buildInteractionContext } from "./context";
 import { deriveBlockId, contentFingerprint } from "../mentalist/blockIds";
@@ -294,5 +297,91 @@ describe("i18n", () => {
 
   it("leaves an unknown placeholder alone rather than printing undefined", () => {
     expect(translate("en", "evidence.grade", {})).toContain("{grade}");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drift guard for src/lib/interaction/status.ts.
+//
+// The status table is a claim about the codebase, and this file exists because
+// three earlier claims about the codebase were written as comments and were
+// wrong for weeks. A comment cannot fail CI; this can.
+//
+// TypeScript already guarantees the table has exactly one entry per event type
+// (it is a Record over InteractionEventType — a missing or extra key will not
+// compile), so nothing here re-checks that. These tests cover only what the
+// type system cannot see: whether the declared wiring and coverage match the
+// actual source.
+//
+// Detection is deliberately literal. An emitter is written as `type: "NAME"`,
+// and so is a test fixture, so both are found by the same pattern. Nothing
+// below may write that pattern with a real event name, or it would count itself
+// as coverage.
+//
+// WHAT THIS GUARD DOES NOT CATCH. It is a text scan, not analysis, so it is a
+// tripwire for the ordinary case, not a proof:
+//   - indirection defeats it — `const t = "EVIDENCE_PINNED"; onEvent({ type: t })`
+//     scans as no emitter, as would single quotes, a line break inside the
+//     object literal, a factory, or a constant lifted to another module;
+//   - an unrelated object carrying the same literal scans as an emitter;
+//   - coverage only proves a type is CONSTRUCTED somewhere in this file. It says
+//     nothing about which reducer branch runs or what is asserted — the
+//     EVIDENCE_PINNED re-pin branch is exactly that gap, and status.ts spells it
+//     out in prose because no scan could;
+//   - the round-trip assertion below does not look for integration tests at all.
+// Closing these needs the integration tests of stage 6, not a cleverer regex.
+// ---------------------------------------------------------------------------
+
+describe("status table matches reality", () => {
+  const readSource = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8");
+
+  const walk = (dir: string): string[] =>
+    readdirSync(join(process.cwd(), dir), { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory()
+        ? walk(join(dir, e.name))
+        : /\.tsx?$/.test(e.name)
+          ? [join(dir, e.name)]
+          : []
+    );
+
+  const literal = (t: string) => `type: ${JSON.stringify(t)}`;
+  const types = Object.keys(EVENT_STATUS) as (keyof typeof EVENT_STATUS)[];
+
+  it("declares wired exactly for the types the app actually emits", () => {
+    // All of src/ except the interaction library itself, which legitimately
+    // carries every literal in its own union and reducer. Scanning only
+    // app/ and components/ would miss an emitter added in a hook or helper.
+    const appSource = walk("src")
+      .filter((f) => !f.startsWith(join("src", "lib", "interaction")))
+      .map(readSource)
+      .join("\n");
+
+    const emitted = types.filter((t) => appSource.includes(literal(t))).sort();
+    expect(emitted).toEqual(WIRED_EVENTS);
+  });
+
+  it("does not claim unit coverage for a type no test constructs", () => {
+    const suite = readSource("src/lib/interaction/interaction.test.ts");
+
+    for (const t of types) {
+      const constructed = suite.includes(literal(t));
+      const claimed = EVENT_STATUS[t].coverage !== "none";
+      expect({ type: t, constructed }).toEqual({ type: t, constructed: claimed });
+    }
+  });
+
+  it("claims no round-trip coverage, because no test touches route, db or DOM", () => {
+    // Pins the CURRENT baseline: nobody may quietly upgrade a row to
+    // "round-trip" without also deleting this assertion, which forces the claim
+    // through review. It does NOT detect that an integration test was added —
+    // adding one and leaving the table understated keeps this green. Understating
+    // is the safe direction of the two; overstating is what this stage exists to
+    // stop.
+    expect(types.filter((t) => EVENT_STATUS[t].coverage === "round-trip")).toEqual([]);
+  });
+
+  it("keeps one wired vertical slice — the honest baseline, not a target", () => {
+    expect(WIRED_EVENTS).toEqual(["CHECKLIST_TOGGLED"]);
+    expect(types.filter((t) => EVENT_STATUS[t].wiring === "reserved")).toHaveLength(9);
   });
 });
