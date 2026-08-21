@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONFIGURATIONS, DEFAULT_CONFIGURATION, resolveConfiguration } from "../src/lib/megabrain/modelRouter";
 import { MODELS } from "../src/lib/megabrain/modelRouter";
 import { MODE_CAPS, CostLedger, AccountingError } from "../src/lib/megabrain/costLedger";
+import { capFor } from "../src/lib/megabrain/analysisMode";
 import { benchmarkCost, fitsStandardCap, modeCost, scale } from "../src/lib/megabrain/costReport";
 import { renderAnalysis, runBaseline, runCase } from "../src/lib/megabrain/engine";
 import { engineCost } from "../src/lib/megabrain/costReport";
@@ -316,9 +317,12 @@ async function engineOnly(): Promise<void> {
   const cfg = resolveConfiguration(CONFIG_ID);
   const c = FROZEN_CASES.slice(0, Math.max(1, LIMIT))[0];
   const e = engineCost(CONFIG_ID);
-  // Its own cap, never the benchmark's. The engine may not exceed a Standard
-  // case's budget just because a bigger number was typed on the command line.
-  const cap = Math.min(MAX_USD > 0 ? MAX_USD : MODE_CAPS.standard, MODE_CAPS.standard);
+  // Its own cap, never the benchmark's, and never above the MODE's cap.
+  //
+  // This clamped to MODE_CAPS.standard ($0.10) rather than the Standard mode's
+  // own $0.05, so --max-usd 0.06 would have raised the mode cap — exactly what
+  // capFor() exists to prevent, bypassed by not calling it.
+  const cap = capFor("standard", MAX_USD > 0 ? MAX_USD : undefined);
 
   console.log(`Mode          : ENGINE ONLY — no baseline, no judge`);
   console.log(`Configuration : ${CONFIG_ID} (${cfg.status})`);
