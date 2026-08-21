@@ -20,6 +20,78 @@ price. The gates:
 | anti-banality | ≥ 85% of cases |
 | Standard case cost | p95 ≤ $0.10 |
 
+## Analysis modes — what a user actually picks
+
+A user chooses how hard their situation is, not a model. Slugs change, get
+deprecated, and mean nothing to somebody with a problem at work.
+
+| mode | label | calls | cap | expected | reserved |
+|---|---|---|---|---|---|
+| light | Быстро / Quick | 1 | $0.02 | $0.0038 | $0.0061 |
+| standard | Разобрать / Analyse | ≤4 | $0.05 | $0.0175 | $0.0326 |
+| strong | Сильный ход / Strong move | ≤5 | $0.10 | $0.0255 | $0.0480 |
+| deep | Глубокое дело / Deep case | — | $0.15 | — | **disabled** |
+
+**Light is its own job**, not a compressed Standard: one assessment, one move,
+one line to say, one risk, one question. Squeezing a case file into one call
+produces a worse version of both, so it is a separate function — "at most one
+model call" is a property of the code shape rather than a rule to remember.
+
+**Strong adds exactly one revision pass.** The critic sees the finished plan,
+the facts and the constraints — never the raw account, never the earlier
+reasoning — and returns a revised plan, not a review. The user is never shown a
+second voice: two personas arguing reads as theatre by the third message. If the
+revision fails, the Standard plan stands, because discarding a valid plan would
+make Strong strictly worse than Standard.
+
+**Deep throws `MODE_NOT_AVAILABLE` with zero transport calls.** Running Standard
+and reporting it as Deep would be a lie about what was paid for.
+
+Caps can only ever be lowered from outside. `recommendMode` suggests and carries
+no side effect: a system that upgrades someone to a paid tier because it judged
+their problem hard is spending their money on its own opinion.
+
+## Language and jurisdiction are different settings
+
+The first live run answered a Russian account in English, which makes the
+exactWords — the lines a user says out loud — unusable.
+
+`responseLanguage` is `auto` | `ru` | `en`. An explicit value always wins;
+`auto` reads the ACCOUNT, never the interface language. Detection counts letters
+and tolerates loanwords, so "performance review" inside a Russian sentence does
+not flip the answer. A gate rejects a plan whose user-facing fields came back
+wrong, and short fields are skipped so a proper noun or a model name cannot fail
+it.
+
+`jurisdiction` is separate and defaults to `unknown`. A Russian speaker may be
+in Armenia; an English speaker anywhere. Inferring law from language is how a
+tool states a confident legal position for the wrong country. Unknown obliges
+the plan to say what it cannot settle; US without a state does too.
+
+## The Founder Lab
+
+`/admin/megabrain-lab`, behind two server-side gates: `MEGABRAIN_LAB=true` and
+membership in `app_admins`. Both return **404, not 403** — a disabled surface
+should not confirm it exists — and the API route re-checks both regardless of
+what the page believes.
+
+Nothing about a live case is persisted: no artifact, no row, no localStorage, no
+draft recovery. Reloading loses the case. That is intended: this is somebody's
+real situation, and a convenience feature that quietly kept it would be a
+decision nobody made.
+
+To enable locally:
+
+```bash
+echo 'MEGABRAIN_LAB=true' >> .env.local   # plus OPENROUTER_API_KEY and Supabase
+npm run dev                                # sign in as an app_admins user
+```
+
+Advanced model choice is a fixed id mapped server-side to a router key. A client
+can never send a provider slug — accepting one would make "any string reaches
+the provider" true, and naming an expensive model is the cheapest exploit
+against a metered API. The choice cannot raise the cap.
+
 ## Architecture, and what was deliberately not built
 
 Three model calls, not eight agents:
@@ -256,6 +328,12 @@ in half of them a user whose own framing is probably wrong.
 - **The model codenames in the brief (Luna / Terra / Sol) are not used.** They
   are defined nowhere in this repository, and putting an unverifiable name on a
   real cost decision would be worse than using the slug.
+- **documentedFacts is always empty.** There is no trusted-artifact input, so
+  nothing here can confirm a document exists. A user's claim to have commits
+  lives in `reportedEvidenceAvailable` with `verificationStatus: "not_reviewed"`.
+- **Anti-banality measures engagement with the case, not insight.** Eight
+  structural signals, read from the structure so the score is identical for the
+  same content in Russian or English. A dull but case-specific answer passes.
 - **p95 cost is projected, not measured.** It becomes real after the first live
   run over all 20 cases.
 - **Anti-banality is a structural proxy, not proof of originality.** It asks

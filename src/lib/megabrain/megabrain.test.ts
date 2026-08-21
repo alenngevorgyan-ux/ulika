@@ -1740,6 +1740,32 @@ describe("the lab is closed by default and cannot be opened from the client", ()
   });
 });
 
+describe("jurisdiction is asked for, never inferred", () => {
+  it("treats language and country as independent inputs", async () => {
+    const pairs: [string, "unknown" | "AM" | "US" | "RU", string | undefined][] = [
+      [FROZEN_CASES[0].account, "AM", undefined],
+      [FROZEN_CASES[0].account, "unknown", undefined],
+      ["My manager took credit for six months of my architecture work and is now reducing my load.", "US", "California"],
+      ["My manager took credit for six months of my architecture work and is now reducing my load.", "unknown", undefined],
+    ];
+    for (const [account, country, region] of pairs) {
+      const r = await runCase(
+        { account, jurisdiction: { country, ...(region ? { region } : {}) } },
+        fixtureTransport({})
+      );
+      expect({ country: r.analysis.jurisdiction.country, lang: r.analysis.language }).toEqual({
+        country,
+        lang: detectLanguage(account),
+      });
+    }
+  });
+
+  it("requires a legal-uncertainty note whenever the country is unknown", () => {
+    const ra = { ...GOOD_ANALYSIS.plan.riskAssessment, jurisdictionKnown: false, legalUncertainty: "" };
+    expect(validatePlan({ ...GOOD_ANALYSIS.plan, riskAssessment: ra }).problems).toContain("plan.riskAssessment");
+  });
+});
+
 describe("no megabrain module can spend money on its own", () => {
   const dir = join(process.cwd(), "src/lib/megabrain");
   /**
