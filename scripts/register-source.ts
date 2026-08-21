@@ -42,10 +42,16 @@ const CANDIDATES: Candidate[] = [
     // this pipeline exists to stop. A human needs to open the Pressbooks
     // copyright page in a browser and read it.
     findings: [
+      // Owner read the book's own copyright page directly in a browser on
+      // 2026-08-21 (this tool's own fetch attempts got 403 from BCcampus) and
+      // reported the exact text back verbatim. That is what makes this
+      // "primary" rather than another catalogue echo: it is the work's own
+      // stated licence, not a third party's claim about it.
       {
-        url: "https://scholarship.shu.edu/psychology-oer/1/",
+        url: "https://pressbooks.bccampus.ca/thescienceofhumanpotential/",
         kind: "primary",
-        quote: "",
+        quote:
+          "Psychology Copyright © by Jeffrey C. Levy is licensed under a Creative Commons Attribution 4.0 International License, except where otherwise noted.",
       },
       {
         url: "https://www.merlot.org/merlot/viewMaterial.htm?id=773419164",
@@ -57,8 +63,12 @@ const CANDIDATES: Candidate[] = [
         kind: "secondary",
         quote: "CC BY 4.0",
       },
+      // The author's institutional repository, checked earlier, still shows
+      // no licence at all. Kept in the record as a genuine absence, not
+      // dropped — it is why this needed a human to look rather than trusting
+      // the catalogues alone.
       {
-        url: "https://pressbooks.bccampus.ca/thescienceofhumanpotential/",
+        url: "https://scholarship.shu.edu/psychology-oer/1/",
         kind: "primary",
         quote: "",
       },
