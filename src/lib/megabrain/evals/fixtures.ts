@@ -195,7 +195,15 @@ interface FixtureOptions {
  * ledger actually takes in production. A fixture that omitted it would test only
  * the static-table fallback and leave the real path unexercised.
  */
-const usage = (i: number, o: number, costUsd: number | null = 0.002) => ({
+/**
+ * Default charges sit well under every configuration's per-stage reservation.
+ *
+ * They used to be tuned to the Sonnet configuration and broke the moment the
+ * default became the cheaper Grok one: the reported cost exceeded the smaller
+ * reservation and every test died on COST_ABOVE_RESERVED. A fixture whose
+ * numbers depend on which model is default is a fixture that will break again.
+ */
+const usage = (i: number, o: number, costUsd: number | null = 0.0005) => ({
   inputTokens: i,
   cachedTokens: 0,
   reasoningTokens: 0,
@@ -239,7 +247,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
     const tel = (): ResponseTelemetry => ({
       responseId: `gen-${Math.random().toString(16).slice(2, 10)}`,
       reportedModel: opts.reportedModel ?? req.modelSlug,
-      selectedProvider: req.modelSlug.startsWith("x-ai") ? "SpaceXAI" : "Google Vertex",
+      selectedProvider: req.modelSlug.startsWith("x-ai") ? "xAI" : "Google",
       serviceTier: "default",
       routingAttempts: [{ provider: "SpaceXAI", status: "ok" }],
     });
@@ -263,7 +271,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
         : GOOD_ANALYSIS.frame;
       return withModel(tamper({
         content: JSON.stringify({ frame, actors: GOOD_ANALYSIS.actors }),
-        usage: usage(900, 400, 0.002), latencyMs: 700,
+        usage: usage(900, 400, 0.0005), latencyMs: 700,
       }));
     }
     if (name === "case_analysis") {
@@ -273,7 +281,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       const leverage = opts.emptyLeverage ? { points: [] } : GOOD_ANALYSIS.leverage;
       return withModel(tamper({
         content: JSON.stringify({ hypotheses, leverage }),
-        usage: usage(1200, 600, 0.02), latencyMs: 2200,
+        usage: usage(1200, 600, 0.002), latencyMs: 2200,
       }));
     }
     if (name === "case_plan") {
@@ -288,7 +296,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
           countermoves: GOOD_ANALYSIS.countermoves,
           plan: opts.planWithoutWords ? { ...GOOD_ANALYSIS.plan, exactWords: [] } : GOOD_ANALYSIS.plan,
         }),
-        usage: usage(1800, 1100, 0.03), latencyMs: 4100,
+        usage: usage(1800, 1100, 0.003), latencyMs: 4100,
       }));
     }
     if (name === "case_analysis_and_plan") {
@@ -300,11 +308,11 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
           countermoves: GOOD_ANALYSIS.countermoves,
           plan: GOOD_ANALYSIS.plan,
         }),
-        usage: usage(2500, 1600, 0.045), latencyMs: 5200,
+        usage: usage(2500, 1600, 0.005), latencyMs: 5200,
       }));
     }
 
     // Baseline or judge: free text.
-    return withModel(tamper({ content: BANAL_BASELINE, usage: usage(700, 200, 0.01), latencyMs: 1500 }));
+    return withModel(tamper({ content: BANAL_BASELINE, usage: usage(700, 200, 0.001), latencyMs: 1500 }));
   };
 }

@@ -2,17 +2,19 @@ import "./_load-env";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONFIGURATIONS } from "../src/lib/megabrain/modelRouter";
+import { CONFIGURATIONS, resolveConfiguration } from "../src/lib/megabrain/modelRouter";
 import { MODELS } from "../src/lib/megabrain/modelRouter";
 import { MODE_CAPS, CostLedger, AccountingError } from "../src/lib/megabrain/costLedger";
-import { benchmarkCost, engineCost, fitsStandardCap, scale } from "../src/lib/megabrain/costReport";
+import { benchmarkCost, fitsStandardCap, scale } from "../src/lib/megabrain/costReport";
 import { renderAnalysis, runBaseline, runCase } from "../src/lib/megabrain/engine";
+import { engineCost } from "../src/lib/megabrain/costReport";
 import { createOpenRouterTransport } from "../src/lib/megabrain/transport";
 import { FROZEN_CASES } from "../src/lib/megabrain/evals/cases";
 import { SMOKE_BASELINE } from "../src/lib/megabrain/modelRouter";
 import { gradeAnswer, summarise } from "../src/lib/megabrain/evals/graders";
 import { compareBlind, summariseComparisons, type ComparisonResult } from "../src/lib/megabrain/evals/compare";
 import { RunRecorder, describeFailure } from "../src/lib/megabrain/runRecorder";
+import { partialArtifact, writeArtifact, type RunArtifact } from "../src/lib/megabrain/artifact";
 
 /**
  * The ONLY thing in this repository that can spend money, and it never runs by
@@ -36,6 +38,7 @@ const value = (name: string, fallback?: string) => {
 };
 
 const LIVE = flag("live");
+const ENGINE_ONLY = flag("engine-only");
 const CONFIG_ID = value("config", "cheap-extract-sonnet")!;
 const LIMIT = Number(value("limit", "5"));
 const MAX_USD = Number(value("max-usd", "0"));
@@ -107,6 +110,7 @@ async function verifyPrices() {
 }
 
 async function live() {
+  if (ENGINE_ONLY) return engineOnly();
   if (!Number.isFinite(MAX_USD) || MAX_USD <= 0) {
     console.error("Refusing to run live without an explicit --max-usd limit.");
     process.exit(1);
@@ -159,9 +163,8 @@ async function live() {
   runLedger.onAttempt = recorder.onAttempt;
   runLedger.onValidation = recorder.onValidation;
   const comparisons: ComparisonResult[] = [];
-  const grades = [];
+  const grades: { engine: ReturnType<typeof gradeAnswer>; baseline: ReturnType<typeof gradeAnswer> | null }[] = [];
 
-  try {
   for (const c of cases) {
     if (runLedger.remainingUsd < per.reservedUsd) {
       console.log(`\nStopping before ${c.id}: $${runLedger.remainingUsd.toFixed(3)} left, one case reserves $${per.reservedUsd.toFixed(3)}.`);
@@ -169,60 +172,90 @@ async function live() {
     }
     process.stdout.write(`${c.id} … `);
     recorder.note("case_started", { caseId: c.id });
+
+    // ---- the engine. Its success is decided here and nowhere else.
     currentStage = "engine";
-    // ONE ledger for the whole run. Engine stages, their retries, the baseline
-    // and the judge all reserve against it before going out, so --max-usd is a
-    // real ceiling rather than something checked after the money is gone.
-    // runCase carves its own $0.10 envelope from runLedger internally.
     const engine = await runCase(
       { account: c.account, configurationId: CONFIG_ID, ledger: runLedger },
       transport
     );
-    currentStage = "baseline";
-    const base = await runBaseline(
-      { account: c.account, ledger: runLedger.envelope(per.baselineReserved) },
-      transport
-    );
     const rendered = renderAnalysis(engine.analysis);
+    const engineGrades = gradeAnswer(c, rendered, engine.analysis);
+    grades.push({ engine: engineGrades, baseline: null });
+    process.stdout.write("engine ok … ");
 
-    grades.push({
-      engine: gradeAnswer(c, rendered, engine.analysis),
-      baseline: gradeAnswer(c, base.answer),
-    });
+    if (ENGINE_ONLY) {
+      writeCaseArtifact(c.id, engine.analysis, engineGrades, "engine-only run: baseline and judge were not requested");
+      console.log("done");
+      continue;
+    }
 
-    currentStage = "judge";
-    const verdict = await compareBlind(
-      { caseId: c.id, account: c.account, engineAnswer: rendered, baselineAnswer: base.answer },
-      { transport, ledger: runLedger.envelope(per.judgeReserved) }
-    );
-    comparisons.push(verdict);
-    console.log(`${verdict.winner}  (spent $${runLedger.budgetedSpendUsd.toFixed(3)})`);
+    // ---- everything below is the BENCHMARK, and it may fail on its own.
+    // A failure here leaves the engine result intact and saved.
+    try {
+      currentStage = "baseline";
+      const base = await runBaseline(
+        { account: c.account, ledger: runLedger.envelope(per.baselineReserved) },
+        transport,
+        resolveConfiguration(CONFIG_ID).baselineModel
+      );
+      grades[grades.length - 1].baseline = gradeAnswer(c, base.answer);
+
+      currentStage = "judge";
+      const verdict = await compareBlind(
+        { caseId: c.id, account: c.account, engineAnswer: rendered, baselineAnswer: base.answer },
+        { transport, ledger: runLedger.envelope(per.judgeReserved), modelKey: resolveConfiguration(CONFIG_ID).judgeModel }
+      );
+      comparisons.push(verdict);
+      console.log(`${verdict.winner}  (spent $${runLedger.budgetedSpendUsd.toFixed(3)})`);
+    } catch (e) {
+      const why = e instanceof Error ? `${e.name} at ${currentStage}: ${e.message}` : String(e);
+      const file = writeCaseArtifact(c.id, engine.analysis, engineGrades, why);
+      recorder.finish("incomplete", describeFailure(e, currentStage), {
+        budgetedSpendUsd: runLedger.budgetedSpendUsd,
+        reportedSpendUsd: runLedger.reportedSpendUsd,
+        hasUnknownCharges: runLedger.hasUnknownCharges,
+        capUsd: MAX_USD,
+        completedCases: comparisons.length,
+      });
+      console.error(`\nENGINE OK, BENCHMARK INCOMPLETE at "${currentStage}".`);
+      console.error(`The engine's plan is saved: ${file.replace(process.cwd(), ".")}`);
+      console.error(`Journal: ${recorder.file.replace(process.cwd(), ".")}`);
+      console.error(
+        `Provider-reported: $${runLedger.reportedSpendUsd.toFixed(4)}; budgeted incl. estimates: ` +
+          `$${runLedger.budgetedSpendUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}`
+      );
+      throw e;
+    }
   }
 
-  } catch (e) {
-    // The money is already spent; what is left to protect is the record of it.
-    recorder.finish("incomplete", describeFailure(e, currentStage), {
-      budgetedSpendUsd: runLedger.budgetedSpendUsd,
-      reportedSpendUsd: runLedger.reportedSpendUsd,
-      hasUnknownCharges: runLedger.hasUnknownCharges,
-      capUsd: MAX_USD,
-      completedCases: comparisons.length,
+  function writeCaseArtifact(
+    caseId: string,
+    analysis: Parameters<typeof renderAnalysis>[0],
+    gates: ReturnType<typeof gradeAnswer>,
+    reason: string
+  ): string {
+    const art: RunArtifact = partialArtifact({
+      caseId,
+      configuration: CONFIG_ID,
+      analysis,
+      gates,
+      ledger: runLedger.allDeep(),
+      totals: {
+        reportedSpendUsd: runLedger.reportedSpendUsd,
+        budgetedSpendUsd: runLedger.budgetedSpendUsd,
+        hasUnknownCharges: runLedger.hasUnknownCharges,
+        latencyMs: runLedger.allDeep().reduce((n, e) => n + e.latencyMs, 0),
+      },
+      incompleteReason: reason,
     });
-    console.error(`\nRUN INCOMPLETE at stage "${currentStage}". Journal: ${recorder.file.replace(process.cwd(), ".")}`);
-    console.error(
-      `Provider-reported before the failure: $${runLedger.reportedSpendUsd.toFixed(4)}; ` +
-        `budgeted incl. estimates: $${runLedger.budgetedSpendUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}` +
-        (runLedger.hasUnknownCharges ? " (contains unpriced calls — actual spend unknown)" : "")
-    );
-    // The last attempt line names the call that died, which the ledger cannot:
-    // a failed call never produces a ledger entry.
-    console.error("The last 'attempt' line in the journal names the failing stage and model.");
-    throw e;
+    // Frozen corpus only. A real user's case needs an explicit opt-in.
+    return writeArtifact(join(OUT_DIR, `artifact-${caseId}-${Date.now()}.json`), art, { frozenCase: true });
   }
 
   const cmp = summariseComparisons(comparisons);
   const engineVerdict = summarise(grades.map((g) => g.engine));
-  const baselineVerdict = summarise(grades.map((g) => g.baseline));
+  const baselineVerdict = summarise(grades.flatMap((g) => (g.baseline ? [g.baseline] : [])));
 
   console.log("\n──────── result ────────");
   console.log(`blind win rate       : ${(cmp.engineWinRate * 100).toFixed(0)}%  (need ≥65%)  ${cmp.passesThreshold ? "PASS" : "FAIL"}`);
@@ -251,6 +284,105 @@ async function live() {
   // The ledger carries no conversation content, so the report is safe to keep.
   writeFileSync(out, JSON.stringify({ config: CONFIG_ID, comparisons, cmp, engineVerdict, baselineVerdict, ledger: runLedger.allDeep() }, null, 2));
   console.log(`\nreport: ${out.replace(process.cwd(), ".")}`);
+}
+
+/**
+ * Run the engine and nothing else.
+ *
+ * The product is the engine. Baseline and judge exist to measure it, and a
+ * measurement failing must never look like the product failing — which is what
+ * happened when a 404 on an optional Sonnet call was reported as a failed run.
+ * This mode makes the distinction structural rather than a matter of reading
+ * the logs carefully.
+ */
+async function engineOnly(): Promise<void> {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) {
+    console.error("OPENROUTER_API_KEY is not set.");
+    process.exit(1);
+  }
+  const cfg = resolveConfiguration(CONFIG_ID);
+  const c = FROZEN_CASES.slice(0, Math.max(1, LIMIT))[0];
+  const e = engineCost(CONFIG_ID);
+  // Its own cap, never the benchmark's. The engine may not exceed a Standard
+  // case's budget just because a bigger number was typed on the command line.
+  const cap = Math.min(MAX_USD > 0 ? MAX_USD : MODE_CAPS.standard, MODE_CAPS.standard);
+
+  console.log(`Mode          : ENGINE ONLY — no baseline, no judge`);
+  console.log(`Configuration : ${CONFIG_ID} (${cfg.status})`);
+  console.log(`Case          : ${c.id}`);
+  console.log(`Reserved      : $${e.reservedUsd.toFixed(4)}   expected $${e.expectedUsd.toFixed(4)}`);
+  console.log(`Engine cap    : $${cap.toFixed(2)}\n`);
+  if (e.reservedUsd > cap) {
+    console.error("Refusing to start: the engine reservation exceeds its cap.");
+    process.exit(1);
+  }
+
+  mkdirSync(OUT_DIR, { recursive: true });
+  const recorder = new RunRecorder(join(OUT_DIR, `engine-${Date.now()}.jsonl`), {
+    configuration: CONFIG_ID,
+    caseId: c.id,
+    capUsd: cap,
+    baseline: "none",
+  });
+  const ledger = new CostLedger("standard", cap);
+  ledger.onRecord = recorder.onLedgerEntry;
+  ledger.onAttempt = recorder.onAttempt;
+  ledger.onValidation = recorder.onValidation;
+
+  const transport = createOpenRouterTransport(key);
+  try {
+    const engine = await runCase({ account: c.account, configurationId: CONFIG_ID, ledger }, transport);
+    const rendered = renderAnalysis(engine.analysis);
+    const gates = gradeAnswer(c, rendered, engine.analysis);
+
+    console.log(rendered);
+    console.log("\n──────── gates ────────");
+    for (const g of gates.gates) console.log(`  ${g.passed ? "PASS" : "FAIL"}  ${g.gate}  — ${g.note}`);
+    console.log(`  anti-banality: ${gates.quality.find((q) => q.axis === "anti_banality")?.note}`);
+
+    const latency = ledger.allDeep().reduce((n, x) => n + x.latencyMs, 0);
+    console.log(
+      `\ncost: reported $${ledger.reportedSpendUsd.toFixed(4)}, budgeted $${ledger.budgetedSpendUsd.toFixed(4)} of $${cap.toFixed(2)}` +
+        `  ·  latency ${(latency / 1000).toFixed(1)}s  ·  validation ok`
+    );
+
+    // Frozen corpus only. A real case would need an explicit opt-in.
+    const file = writeArtifact(
+      join(OUT_DIR, `artifact-${c.id}-${Date.now()}.json`),
+      {
+        ...partialArtifact({
+          caseId: c.id, configuration: CONFIG_ID, analysis: engine.analysis, gates,
+          ledger: ledger.allDeep(),
+          totals: {
+            reportedSpendUsd: ledger.reportedSpendUsd,
+            budgetedSpendUsd: ledger.budgetedSpendUsd,
+            hasUnknownCharges: ledger.hasUnknownCharges,
+            latencyMs: latency,
+          },
+          incompleteReason: "engine-only run: baseline and judge were not requested",
+        }),
+      },
+      { frozenCase: true }
+    );
+    recorder.finish("complete", undefined, {
+      reportedSpendUsd: ledger.reportedSpendUsd,
+      budgetedSpendUsd: ledger.budgetedSpendUsd,
+      hasUnknownCharges: ledger.hasUnknownCharges,
+    });
+    console.log(`artifact: ${file.replace(process.cwd(), ".")}`);
+    // Exit 0 only here: a complete run whose plan passed every validator.
+    process.exit(0);
+  } catch (err) {
+    recorder.finish("incomplete", describeFailure(err, "engine"), {
+      reportedSpendUsd: ledger.reportedSpendUsd,
+      budgetedSpendUsd: ledger.budgetedSpendUsd,
+      hasUnknownCharges: ledger.hasUnknownCharges,
+    });
+    console.error(`\nENGINE FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`Journal: ${recorder.file.replace(process.cwd(), ".")}`);
+    process.exit(1);
+  }
 }
 
 async function main() {

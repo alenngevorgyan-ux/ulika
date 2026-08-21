@@ -309,7 +309,15 @@ export async function runBaseline(
   const mode: CaseMode = input.mode ?? "standard";
   const ledger = input.ledger ?? new CostLedger(mode, MODE_CAPS[mode]);
   const spec = modelFor(
-    { id: "baseline", description: "", pipeline: "three-stage", roles: { extract: modelKey, analyse: modelKey, strategise: modelKey } },
+    {
+      id: "baseline",
+      description: "",
+      pipeline: "three-stage",
+      roles: { extract: modelKey, analyse: modelKey, strategise: modelKey },
+      baselineModel: modelKey,
+      judgeModel: modelKey,
+      status: "verified",
+    },
     "strategise"
   );
   const system = baselinePrompt();

@@ -85,6 +85,21 @@ export interface Configuration {
   description: string;
   roles: Record<ModelRole, string>;
   pipeline: PipelineShape;
+  /** Model for the matched-contract baseline. */
+  baselineModel: string;
+  /** Model for the blind judge. */
+  judgeModel: string;
+  /**
+   * Whether this configuration has been shown to work against the live route.
+   *
+   * "unverified" is not a guess: anthropic/claude-sonnet-5 returned HTTP 404 on
+   * this exact parameter combination in two separate runs, on two different
+   * keys, while grok and gemini-flash-lite succeeded on the same combination.
+   * The cause is not diagnosed and is deliberately not being chased here; the
+   * status exists so nobody spends money rediscovering it.
+   */
+  status: "verified" | "unverified";
+  note?: string;
 }
 
 /**
@@ -114,6 +129,10 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       strategise: "claude-sonnet-5",
     },
     pipeline: "three-stage",
+    baselineModel: "claude-sonnet-5",
+    judgeModel: "grok-4.3",
+    status: "unverified",
+    note: "Sonnet returned 404 on this parameter combination twice. Not the default; do not run.",
   },
   "cheap-extract-grok": {
     id: "cheap-extract-grok",
@@ -124,6 +143,10 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       strategise: "grok-4.3",
     },
     pipeline: "three-stage",
+    baselineModel: "claude-sonnet-5",
+    judgeModel: "grok-4.3",
+    status: "unverified",
+    note: "Engine models verified live; the Sonnet baseline is not. Use grok-matched instead.",
   },
   "all-cheap": {
     id: "all-cheap",
@@ -134,7 +157,37 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       strategise: "gemini-3.1-flash-lite",
     },
     pipeline: "three-stage",
+    baselineModel: "gemini-3.1-flash-lite",
+    judgeModel: "gemini-3.1-flash-lite",
+    status: "verified",
   },
+  /**
+   * The scientific control, and the one to benchmark with.
+   *
+   * Engine and matched baseline run on the SAME Grok model, so the comparison
+   * isolates STRUCTURE as the variable rather than measuring one model against
+   * another. Both were verified live on 2026-08-22.
+   *
+   * The judge sits on the cheap Gemini model — a different family from the
+   * systems it judges, and one that has answered on this route. It is an
+   * auxiliary signal: on a small sample the real call is a human reading both
+   * answers blind.
+   */
+  "grok-matched": {
+    id: "grok-matched",
+    description:
+      "Engine and matched baseline both on Grok 4.3; extraction on the cheap model; Gemini judge. Structure is the only variable.",
+    roles: {
+      extract: "gemini-3.1-flash-lite",
+      analyse: "grok-4.3",
+      strategise: "grok-4.3",
+    },
+    pipeline: "three-stage",
+    baselineModel: "grok-4.3",
+    judgeModel: "gemini-3.1-flash-lite",
+    status: "verified",
+  },
+
   "ablation-two-call": {
     id: "ablation-two-call",
     description:
@@ -145,10 +198,13 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
       strategise: "claude-sonnet-5",
     },
     pipeline: "two-stage",
+    baselineModel: "claude-sonnet-5",
+    judgeModel: "grok-4.3",
+    status: "unverified",
   },
 };
 
-export const DEFAULT_CONFIGURATION = "cheap-extract-sonnet";
+export const DEFAULT_CONFIGURATION = "grok-matched";
 
 export function resolveConfiguration(id: string = DEFAULT_CONFIGURATION): Configuration {
   const cfg = CONFIGURATIONS[id];

@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { RunRecorder, describeFailure } from "./runRecorder";
+import { partialArtifact, writeArtifact, ArtifactRefused } from "./artifact";
+import { engineCost } from "./costReport";
 import { ProviderHttpError } from "./transport";
 import { EXTRACT_SCHEMA, STRATEGISE_SCHEMA } from "./jsonSchemas";
 import { join } from "node:path";
@@ -202,9 +204,12 @@ describe("a benchmark budget never relaxes the engine budget", () => {
 
     await expect(
       runCase(
-        { account: "x", mode: "standard", ledger: benchmark },
-        // Each figure sits under its own stage reservation, so the run is
-        // stopped by the $0.10 envelope rather than by the overcharge check.
+        // Pinned to the expensive configuration on purpose. This test is about
+        // the NESTING of budgets, and the default Grok engine is far too cheap
+        // for one case to approach $0.10 at all — its whole run reserves under
+        // $0.04. Each charge still sits under its own stage reservation, so the
+        // run is stopped by the envelope and not by the overcharge check.
+        { account: "x", mode: "standard", configurationId: "cheap-extract-sonnet", ledger: benchmark },
         fixtureTransport({
           strategiseGarbageFirst: true,
           stageCosts: { extract: 0.003, analyse: 0.03, strategise: 0.045 },
@@ -228,7 +233,7 @@ describe("a benchmark budget never relaxes the engine budget", () => {
     await expect(
       runCase(
         { account: "x", mode: "standard", ledger: benchmark },
-        fixtureTransport({ strategiseGarbageFirst: true, stageCosts: { extract: 0.001, analyse: 0.004, strategise: 0.004 } })
+        fixtureTransport({ strategiseGarbageFirst: true, stageCosts: { extract: 0.0005, analyse: 0.001, strategise: 0.001 } })
       )
     ).resolves.toBeTruthy();
     expect(benchmark.budgetedSpendUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
@@ -698,7 +703,7 @@ describe("engine orchestration", () => {
     const calls: CompletionRequest[] = [];
     await runCase({ account: "x" }, fixtureTransport({ spy: calls }));
     expect(calls[0].modelSlug).toBe(MODELS["gemini-3.1-flash-lite"].slug);
-    expect(calls[2].modelSlug).toBe(MODELS["claude-sonnet-5"].slug);
+    expect(calls[2].modelSlug).toBe(MODELS["grok-4.3"].slug);
   });
   it("requests structured output on every reasoning stage", async () => {
     const calls: CompletionRequest[] = [];
@@ -928,6 +933,152 @@ describe("the ledger reports what actually happened, in order", () => {
   });
 });
 
+describe("a successful engine survives a failing benchmark", () => {
+  const tmpArt = () => join(tmpdir(), `ulika-art-${Math.random().toString(16).slice(2)}.json`);
+
+  it("keeps the FinalCasePlan when the baseline fails afterwards", async () => {
+    // The exact loss that happened live: three valid stages, a complete plan,
+    // then a 404 on an optional baseline call, and the plan vanished.
+    const c = FROZEN_CASES[0];
+    const ledger = new CostLedger("standard", 1);
+    const engine = await runCase({ account: c.account, ledger }, fixtureTransport({}));
+    const gates = gradeAnswer(c, renderAnalysis(engine.analysis), engine.analysis);
+
+    const art = partialArtifact({
+      caseId: c.id, configuration: "grok-matched", analysis: engine.analysis, gates,
+      ledger: ledger.allDeep(),
+      totals: { reportedSpendUsd: ledger.reportedSpendUsd, budgetedSpendUsd: ledger.budgetedSpendUsd, hasUnknownCharges: false, latencyMs: 1 },
+      incompleteReason: "ProviderHttpError at baseline: 404",
+    });
+    const path = tmpArt();
+    writeArtifact(path, art, { frozenCase: true });
+
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    expect(onDisk.engineStatus).toBe("complete");
+    expect(onDisk.benchmarkStatus).toBe("incomplete");
+    expect(onDisk.analysis.plan.exactWords.length).toBeGreaterThan(0);
+    expect(onDisk.analysis.plan.conclusion).toBe(engine.analysis.plan.conclusion);
+    rmSync(path);
+  });
+
+  it("does not pretend the baseline or judge happened", async () => {
+    const c = FROZEN_CASES[0];
+    const ledger = new CostLedger("standard", 1);
+    const engine = await runCase({ account: c.account, ledger }, fixtureTransport({}));
+    const art = partialArtifact({
+      caseId: c.id, configuration: "grok-matched", analysis: engine.analysis,
+      gates: gradeAnswer(c, renderAnalysis(engine.analysis), engine.analysis),
+      ledger: ledger.allDeep(),
+      totals: { reportedSpendUsd: 0, budgetedSpendUsd: 0, hasUnknownCharges: false, latencyMs: 0 },
+      incompleteReason: "baseline failed",
+    });
+    expect(art.baselineResult).toBeNull();
+    expect(art.judgeResult).toBeNull();
+    // A missing comparison is not a tie. Filling this in would turn an absent
+    // measurement into a result.
+    expect(art.winner).toBeNull();
+  });
+
+  it("refuses to persist anything derived from a real case without an opt-in", () => {
+    const art = partialArtifact({
+      caseId: "user-case", configuration: "grok-matched", analysis: GOOD_ANALYSIS,
+      gates: gradeAnswer(FROZEN_CASES[0], GOOD_RENDER, GOOD_ANALYSIS),
+      ledger: [], totals: { reportedSpendUsd: 0, budgetedSpendUsd: 0, hasUnknownCharges: false, latencyMs: 0 },
+      incompleteReason: "x",
+    });
+    expect(() => writeArtifact(tmpArt(), art, { frozenCase: false })).toThrow(ArtifactRefused);
+    // And permits it when the caller says so explicitly.
+    const path = tmpArt();
+    expect(() => writeArtifact(path, art, { frozenCase: false, persistRealCase: true })).not.toThrow();
+    rmSync(path);
+  });
+
+  it("carries no account text or chain of thought", async () => {
+    const c = FROZEN_CASES[0];
+    const ledger = new CostLedger("standard", 1);
+    const engine = await runCase({ account: c.account, ledger }, fixtureTransport({}));
+    const art = partialArtifact({
+      caseId: c.id, configuration: "grok-matched", analysis: engine.analysis,
+      gates: gradeAnswer(c, renderAnalysis(engine.analysis), engine.analysis),
+      ledger: ledger.allDeep(),
+      totals: { reportedSpendUsd: 0, budgetedSpendUsd: 0, hasUnknownCharges: false, latencyMs: 0 },
+      incompleteReason: "x",
+    });
+    // The plan is kept; the situation the user described is not.
+    expect(JSON.stringify(art)).not.toContain(c.account.slice(0, 60));
+  });
+
+  it("writes atomically, leaving no half-file behind", () => {
+    const path = tmpArt();
+    const art = partialArtifact({
+      caseId: "c", configuration: "grok-matched", analysis: GOOD_ANALYSIS,
+      gates: gradeAnswer(FROZEN_CASES[0], GOOD_RENDER, GOOD_ANALYSIS),
+      ledger: [], totals: { reportedSpendUsd: 0, budgetedSpendUsd: 0, hasUnknownCharges: false, latencyMs: 0 },
+      incompleteReason: "x",
+    });
+    writeArtifact(path, art, { frozenCase: true });
+    expect(existsSync(`${path}.tmp`)).toBe(false);
+    expect(JSON.parse(readFileSync(path, "utf8")).caseId).toBe("c");
+    rmSync(path);
+  });
+});
+
+describe("engine and benchmark fail independently", () => {
+  it("runs exactly three transport calls with no retry", async () => {
+    const calls: CompletionRequest[] = [];
+    await runCase({ account: FROZEN_CASES[0].account, configurationId: "grok-matched" }, fixtureTransport({ spy: calls }));
+    expect(calls).toHaveLength(3);
+    expect(calls.map((c) => c.jsonSchema?.name)).toEqual(["case_extraction", "case_analysis", "case_plan"]);
+  });
+
+  it("never calls a baseline or judge model during an engine run", async () => {
+    const calls: CompletionRequest[] = [];
+    await runCase({ account: "x", configurationId: "grok-matched" }, fixtureTransport({ spy: calls }));
+    // Every call carries a schema; the baseline and judge never do.
+    expect(calls.every((c) => Boolean(c.jsonSchema))).toBe(true);
+  });
+
+  it("leaves the engine result intact when the judge throws", async () => {
+    const ledger = new CostLedger("standard", 1);
+    const engine = await runCase({ account: "x", ledger }, fixtureTransport({}));
+    // The judge is a separate call on a separate envelope; its failure cannot
+    // reach back into a result that already exists.
+    expect(engine.analysis.plan.conclusion.length).toBeGreaterThan(0);
+    expect(engine.problems).toEqual([]);
+  });
+});
+
+describe("the benchmark configuration compares like with like", () => {
+  it("puts the engine and the matched baseline on the same model", () => {
+    const cfg = resolveConfiguration("grok-matched");
+    expect(cfg.roles.strategise).toBe("grok-4.3");
+    expect(cfg.baselineModel).toBe("grok-4.3");
+  });
+
+  it("judges with a different family from the systems judged", () => {
+    const cfg = resolveConfiguration("grok-matched");
+    expect(cfg.judgeModel).not.toBe(cfg.baselineModel);
+    expect(cfg.judgeModel).toBe("gemini-3.1-flash-lite");
+  });
+
+  it("is the default, and is marked verified", () => {
+    expect(resolveConfiguration().id).toBe("grok-matched");
+    expect(resolveConfiguration().status).toBe("verified");
+  });
+
+  it("marks every Sonnet configuration unverified rather than deleting it", () => {
+    for (const cfg of Object.values(CONFIGURATIONS)) {
+      const usesSonnet = Object.values(cfg.roles).includes("claude-sonnet-5") || cfg.baselineModel === "claude-sonnet-5";
+      if (usesSonnet) expect({ id: cfg.id, status: cfg.status }).toEqual({ id: cfg.id, status: "unverified" });
+    }
+  });
+
+  it("fits a Standard case and leaves room", () => {
+    const e = engineCost("grok-matched");
+    expect(e.reservedUsd).toBeLessThan(MODE_CAPS.standard * 0.5);
+  });
+});
+
 describe("telemetry is a strict allowlist", () => {
   const echo = "СЕКРЕТНЫЙ ТЕКСТ РАССКАЗА ПОЛЬЗОВАТЕЛЯ";
 
@@ -1005,7 +1156,7 @@ describe("the ledger carries the observability fields and only those", () => {
     expect(first.responseId).toMatch(/^gen-/);
     expect(first.model).toBe("google/gemini-3.1-flash-lite");
     expect(first.reportedModel).toBe("google/gemini-3.1-flash-lite");
-    expect(first.selectedProvider).toBe("Google Vertex");
+    expect(first.selectedProvider).toBe("Google");
     expect(first.serviceTier).toBe("default");
   });
 
@@ -1086,7 +1237,7 @@ describe("the run journal survives a mid-run failure", () => {
     const last = JSON.parse(text.trim().split("\n").pop()!);
     expect(last.status).toBe("incomplete");
     expect(last.failure.httpStatus).toBe(404);
-    expect(last.failure.requestedModel).toBe("anthropic/claude-sonnet-5");
+    expect(last.failure.requestedModel).toBe("x-ai/grok-4.3");
     expect(last.failure.errorKind).toBe("ProviderHttpError");
     expect(last.failure.providerCode).toBe("404");
     // No prompt, no answer, no account.
@@ -1157,7 +1308,7 @@ describe("the run journal survives a mid-run failure", () => {
     // Exactly one attempt without a matching record: that is the failing call.
     const dangling = attempts[attempts.length - 1];
     expect(dangling.stage).toBe("strategise");
-    expect(dangling.model).toBe("anthropic/claude-sonnet-5");
+    expect(dangling.model).toBe("x-ai/grok-4.3");
     expect(dangling.reservedUsd).toBeGreaterThan(0);
     rmSync(path);
   });

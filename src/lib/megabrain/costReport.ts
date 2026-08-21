@@ -77,13 +77,15 @@ export function engineCost(configId: string): Bound {
 }
 
 /** The matched-contract baseline. Single call, free text, no retry. */
-export function baselineCost(modelKey = "claude-sonnet-5"): Bound {
-  return call(MODELS[modelKey], PROMPT_CHARS.baseline, MAX_OUTPUT_TOKENS.baseline, false);
+export function baselineCost(configId?: string, modelKey?: string): Bound {
+  const key = modelKey ?? resolveConfiguration(configId).baselineModel;
+  return call(MODELS[key], PROMPT_CHARS.baseline, MAX_OUTPUT_TOKENS.baseline, false);
 }
 
 /** The blind judge. One short structured verdict, no retry. */
-export function judgeCost(modelKey = "grok-4.3"): Bound {
-  return call(MODELS[modelKey], PROMPT_CHARS.judge, 200, false);
+export function judgeCost(configId?: string, modelKey?: string): Bound {
+  const key = modelKey ?? resolveConfiguration(configId).judgeModel;
+  return call(MODELS[key], PROMPT_CHARS.judge, 200, false);
 }
 
 export interface BenchmarkCost {
@@ -96,8 +98,8 @@ export interface BenchmarkCost {
 /** B. Benchmark: engine + baseline + judge for one case. */
 export function benchmarkCost(configId: string): BenchmarkCost {
   const engine = engineCost(configId);
-  const baseline = baselineCost();
-  const judge = judgeCost();
+  const baseline = baselineCost(configId);
+  const judge = judgeCost(configId);
   return { engine, baseline, judge, total: sum([engine, baseline, judge]) };
 }
 
