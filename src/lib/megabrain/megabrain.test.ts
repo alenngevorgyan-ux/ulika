@@ -1024,6 +1024,94 @@ describe("the run journal survives a mid-run failure", () => {
     expect(described!.errorKind).toBe("AccountingError");
   });
 
+  it("names the exact stage and model of a call that failed, which no ledger line can", async () => {
+    // The gap the first live run exposed: two successful stages in the journal,
+    // a bare 404 on stdout, and no way afterwards to say which call died. A
+    // failed call produces no ledger entry by definition, so the attempt line
+    // written before the request is the only record it ever existed.
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.15, baseline: "matched-contract" });
+    const ledger = new CostLedger("standard", 1);
+    ledger.onRecord = rec.onLedgerEntry;
+    ledger.onAttempt = rec.onAttempt;
+
+    await expect(
+      runCase({ account: "x", ledger }, fixtureTransport({ failAtStrategise: true }))
+    ).rejects.toThrow(ProviderHttpError);
+
+    const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const attempts = lines.filter((l) => l.t === "attempt");
+    const recorded = lines.filter((l) => l.t === "ledger");
+    expect(attempts.map((a) => a.stage)).toEqual(["extract", "analyse", "strategise"]);
+    expect(recorded.map((r) => r.stage)).toEqual(["extract", "analyse"]);
+    // Exactly one attempt without a matching record: that is the failing call.
+    const dangling = attempts[attempts.length - 1];
+    expect(dangling.stage).toBe("strategise");
+    expect(dangling.model).toBe("anthropic/claude-sonnet-5");
+    expect(dangling.reservedUsd).toBeGreaterThan(0);
+    rmSync(path);
+  });
+
+  it("records a charge that failed accounting, instead of losing it", async () => {
+    // The worse of the two gaps. record() used to throw BEFORE pushing the
+    // entry, so an overcharge was detected and its evidence discarded — leaving
+    // a bill with no matching line anywhere.
+    const path = tmp();
+    const rec = new RunRecorder(path, { configuration: "c", caseId: "x", capUsd: 0.15, baseline: "matched-contract" });
+    const ledger = new CostLedger("standard", 10);
+    ledger.onRecord = rec.onLedgerEntry;
+    ledger.onAttempt = rec.onAttempt;
+
+    await expect(
+      runCase({ account: "x", ledger }, fixtureTransport({ overcharge: true }))
+    ).rejects.toThrow(AccountingError);
+
+    const recorded = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.t === "ledger");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].estimatedCostUsd).toBe(9.99);
+    expect(recorded[0].accountingFailure).toBe("COST_ABOVE_RESERVED");
+    expect(recorded[0].costSource).toBe("provider");
+    // And the money is counted, not quietly dropped from the total.
+    expect(ledger.spentUsd).toBeCloseTo(9.99, 6);
+    rmSync(path);
+  });
+
+  it("records an unpriced charge at its reserved upper bound, marked as not a fact", async () => {
+    const ledger = new CostLedger("standard", 10);
+    await expect(
+      runCase({ account: "x", ledger }, fixtureTransport({ brokenCost: { value: undefined } }))
+    ).rejects.toThrow(/COST_MISSING/);
+    const [entry] = ledger.allDeep();
+    expect(entry.costSource).toBe("unreported");
+    expect(entry.accountingFailure).toBe("COST_MISSING");
+    // Conservative: over-stating spend is the safe direction for a budget.
+    expect(entry.estimatedCostUsd).toBeGreaterThan(0);
+    expect(ledger.spentUsd).toBe(entry.estimatedCostUsd);
+  });
+
+  it("records a model swap before refusing, since that call was billed too", async () => {
+    const ledger = new CostLedger("standard", 10);
+    await expect(
+      runCase({ account: "x", ledger }, fixtureTransport({ reportedModel: "some/other-model" }))
+    ).rejects.toThrow(/MODEL_MISMATCH/);
+    const [entry] = ledger.allDeep();
+    expect(entry.accountingFailure).toBe("MODEL_MISMATCH");
+    expect(ledger.spentUsd).toBeGreaterThan(0);
+  });
+
+  it("distinguishes stopped-before-spending from spent-then-stopped", async () => {
+    let budgetFailure, accountingFailure;
+    try {
+      await runCase({ account: "x", ledger: new CostLedger("standard", 0.0001) }, fixtureTransport({}));
+    } catch (e) { budgetFailure = describeFailure(e, "extract"); }
+    try {
+      await runCase({ account: "x", ledger: new CostLedger("standard", 10) }, fixtureTransport({ overcharge: true }));
+    } catch (e) { accountingFailure = describeFailure(e, "extract"); }
+    // The difference a bill will show, so the journal has to show it too.
+    expect(budgetFailure!.chargeAlreadyIncurred).toBe(false);
+    expect(accountingFailure!.chargeAlreadyIncurred).toBe(true);
+  });
+
   it("states its own limit rather than promising crash-proof persistence", () => {
     // Normalised: the sentence is wrapped across comment lines, and a literal
     // search would fail on the line break rather than on a missing caveat.

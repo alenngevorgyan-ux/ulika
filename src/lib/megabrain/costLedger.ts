@@ -40,8 +40,22 @@ export interface LedgerEntry {
   estimatedCostUsd: number;
   /** Monotonic across the whole tree, so allDeep() can order truthfully. */
   seq: number;
-  /** "provider" when the provider reported the charge; "table" when derived. */
-  costSource: "provider" | "table";
+  /**
+   * Where the figure came from.
+   *   provider   — the provider reported it. The real charge.
+   *   unreported — the provider charged but did not say how much. The number is
+   *                the RESERVATION, i.e. a conservative upper bound, not a fact.
+   *   table      — derived from the price table. Preflight only.
+   */
+  costSource: "provider" | "unreported" | "table";
+  /**
+   * Set when this call was charged but failed accounting.
+   *
+   * The entry exists ANYWAY, which is the point: an overcharge that is detected
+   * and then thrown away leaves a bill with no matching record. Detecting it is
+   * only useful if the evidence survives.
+   */
+  accountingFailure: AccountingFailure | null;
   /** Dollars still available to the whole request when this call was made. */
   requestBudgetUsd: number;
   /** True when the guard refused, and the call never went out. */
@@ -61,6 +75,7 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
   "estimatedCostUsd",
   "seq",
   "costSource",
+  "accountingFailure",
   "requestBudgetUsd",
   "stoppedByBudgetGuard",
 ];
@@ -144,6 +159,17 @@ export class CostLedger {
    */
   onRecord?: (entry: LedgerEntry) => void;
 
+  /**
+   * Called after a reservation passes and IMMEDIATELY BEFORE the request goes
+   * out.
+   *
+   * Without it, a request that fails never appears anywhere: only successful
+   * calls produce a ledger entry, so a 404 left the journal showing what had
+   * worked and nothing about what died. The attempt line is what makes the
+   * failing stage and slug identifiable at all.
+   */
+  onAttempt?: (attempt: { stage: string; model: string; provider: string; reservedUsd: number }) => void;
+
   constructor(
     readonly mode: CaseMode,
     readonly capUsd: number = MODE_CAPS[mode],
@@ -151,6 +177,7 @@ export class CostLedger {
   ) {
     parent?.children.push(this);
     this.onRecord = parent?.onRecord;
+    this.onAttempt = parent?.onAttempt;
   }
 
   /**
@@ -229,6 +256,7 @@ export class CostLedger {
         latencyMs: 0,
         estimatedCostUsd: projectedUsd,
         costSource: "table",
+        accountingFailure: null,
         seq: SEQ++,
         requestBudgetUsd: this.remainingUsd,
         stoppedByBudgetGuard: true,
@@ -236,6 +264,12 @@ export class CostLedger {
       this.onRecord?.(this.entries[this.entries.length - 1]);
       throw new BudgetExceededError(stage, this.spentUsd + projectedUsd, this.capUsd);
     }
+    this.onAttempt?.({
+      stage,
+      model: spec.slug,
+      provider: spec.provider,
+      reservedUsd: projectedUsd,
+    });
     return { inputTokens, projectedUsd };
   }
 
@@ -265,21 +299,21 @@ export class CostLedger {
   }): LedgerEntry {
     const { stage, spec, usage, latencyMs } = args;
 
-    if (args.reportedModel && args.reportedModel !== spec.slug) {
-      // A silent fallback to another model invalidates every price we reserved
-      // against, so continuing would be accounting against fiction.
-      throw new AccountingError(stage, "MODEL_MISMATCH");
-    }
-    assertUsableCost(stage, usage.rawCost);
-    if (args.reservedUsd !== undefined && (usage.actualCostUsd ?? 0) > args.reservedUsd) {
-      throw new AccountingError(stage, "COST_ABOVE_RESERVED");
-    }
+    // Classify BEFORE deciding what to write, but write before throwing. The
+    // provider has already charged for this call; refusing to record it because
+    // the figure is wrong leaves a bill with no matching entry, which is worse
+    // than an entry marked as unreliable.
+    const failure = classify(spec, usage, args.reportedModel, args.reservedUsd);
     // Always the provider's figure: assertUsableCost above has already refused
     // anything else, so the "table" branch is unreachable for a recorded call.
     // The field stays because it documents provenance in the report and because
     // a future provider without cost reporting would need it back deliberately,
     // not silently.
     const fromProvider = usage.actualCostUsd !== null;
+    // When the provider charged but did not say how much, the reservation is
+    // the only defensible number: it is the upper bound we agreed to, and
+    // over-stating spend is the safe direction for a budget.
+    const recordedCost = fromProvider ? usage.actualCostUsd! : (args.reservedUsd ?? 0);
     const entry: LedgerEntry = {
       provider: spec.provider,
       model: spec.slug,
@@ -289,16 +323,17 @@ export class CostLedger {
       reasoningTokens: usage.reasoningTokens,
       outputTokens: usage.outputTokens,
       latencyMs,
-      estimatedCostUsd: fromProvider
-        ? usage.actualCostUsd!
-        : costOf(spec, usage.inputTokens, usage.outputTokens),
-      costSource: fromProvider ? "provider" : "table",
+      estimatedCostUsd: recordedCost,
+      costSource: fromProvider ? "provider" : "unreported",
+      accountingFailure: failure,
       seq: SEQ++,
       requestBudgetUsd: this.remainingUsd,
       stoppedByBudgetGuard: false,
     };
     this.entries.push(entry);
     this.onRecord?.(entry);
+    // Only now. The evidence is on disk; the pipeline stops.
+    if (failure) throw new AccountingError(stage, failure);
     return entry;
   }
 }
@@ -359,6 +394,29 @@ export function readUsage(raw: unknown): ProviderUsage {
  * provider surprised us. "Something was wrong with the cost" is not actionable
  * at the moment a run stops.
  */
+/**
+ * Decide whether this call's accounting is trustworthy, without throwing.
+ *
+ * Separated from the throw so the caller can record the entry first. Order
+ * matters: a model mismatch invalidates the price we reserved against, so it
+ * outranks a cost figure that may itself be priced at the wrong model.
+ */
+function classify(
+  spec: ModelSpec,
+  usage: ProviderUsage,
+  reportedModel: string | undefined,
+  reservedUsd: number | undefined
+): AccountingFailure | null {
+  if (reportedModel && reportedModel !== spec.slug) return "MODEL_MISMATCH";
+  const raw = usage.rawCost;
+  if (raw === undefined || raw === null) return "COST_MISSING";
+  if (typeof raw !== "number") return "COST_NOT_A_NUMBER";
+  if (Number.isNaN(raw) || !Number.isFinite(raw)) return "COST_NOT_FINITE";
+  if (raw < 0) return "COST_NEGATIVE";
+  if (reservedUsd !== undefined && raw > reservedUsd) return "COST_ABOVE_RESERVED";
+  return null;
+}
+
 export function assertUsableCost(stage: string, raw: unknown): number {
   if (raw === undefined || raw === null) throw new AccountingError(stage, "COST_MISSING");
   if (typeof raw !== "number") throw new AccountingError(stage, "COST_NOT_A_NUMBER");

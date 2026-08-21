@@ -44,6 +44,12 @@ export interface RunFailure {
   errorKind: string;
   /** Our own failure code, when the error carries one. */
   internalCode: string | null;
+  /**
+   * True when the failing call had already been charged. Distinguishes "we
+   * stopped before spending" from "we spent and then stopped", which is the
+   * difference a bill will show.
+   */
+  chargeAlreadyIncurred: boolean;
 }
 
 export class RunRecorder {
@@ -64,6 +70,18 @@ export class RunRecorder {
     // process dies, which is the failure mode this file exists to remove.
     appendFileSync(this.path, JSON.stringify(obj) + "\n");
   }
+
+  /**
+   * Hook for CostLedger.onAttempt. Written immediately BEFORE a request leaves.
+   *
+   * This is what makes a failed call identifiable. A ledger line only exists
+   * for a call that came back; the first live run showed two successful stages
+   * and a bare "Provider request failed (404)", and the failing stage could not
+   * be determined afterwards from either.
+   */
+  readonly onAttempt = (a: { stage: string; model: string; provider: string; reservedUsd: number }): void => {
+    this.line({ t: "attempt", at: new Date().toISOString(), ...a });
+  };
 
   /** Hook for CostLedger.onRecord. Called for every call and every refusal. */
   readonly onLedgerEntry = (entry: LedgerEntry): void => {
@@ -108,5 +126,8 @@ export function describeFailure(e: unknown, currentStage: string | null): RunFai
     providerCode: isProviderHttp && typeof err?.code === "string" ? err.code : null,
     errorKind: typeof err?.name === "string" ? err.name : "Error",
     internalCode: !isProviderHttp && typeof err?.code === "string" ? err.code : null,
+    // An AccountingError only exists because a call completed and was billed.
+    // A BudgetExceededError means the opposite: nothing was sent.
+    chargeAlreadyIncurred: err?.name === "AccountingError" || isProviderHttp,
   };
 }

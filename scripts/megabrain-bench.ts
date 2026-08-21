@@ -156,6 +156,7 @@ async function live() {
   // additionally cannot exceed the Standard cap whatever this number is.
   const runLedger = new CostLedger("standard", MAX_USD);
   runLedger.onRecord = recorder.onLedgerEntry;
+  runLedger.onAttempt = recorder.onAttempt;
   const comparisons: ComparisonResult[] = [];
   const grades = [];
 
@@ -206,6 +207,9 @@ async function live() {
     });
     console.error(`\nRUN INCOMPLETE at stage "${currentStage}". Journal: ${recorder.file.replace(process.cwd(), ".")}`);
     console.error(`Spent before the failure: $${runLedger.spentUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}.`);
+    // The last attempt line names the call that died, which the ledger cannot:
+    // a failed call never produces a ledger entry.
+    console.error("The last 'attempt' line in the journal names the failing stage and model.");
     throw e;
   }
 
