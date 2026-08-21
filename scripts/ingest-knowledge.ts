@@ -10,7 +10,9 @@
  * Run:  npx tsx scripts/ingest-knowledge.ts [--dry-run]
  * Needs OPENROUTER_API_KEY and SUPABASE_SERVICE_ROLE_KEY_ULIKA in env.
  */
+import "./_load-env";
 import { createClient } from "@supabase/supabase-js";
+import { assertEnv } from "./_env-guard";
 import { CRAFT, type KnowledgeEntry } from "../src/lib/knowledge/craft";
 import { PSYCHOLOGY } from "../src/lib/knowledge/psychology";
 import { LEARNING } from "../src/lib/knowledge/learning";
@@ -115,6 +117,11 @@ function chunksFor(entry: KnowledgeEntry) {
 }
 
 async function main() {
+  // Refuses before a single request: wrong project, wrong environment label, or
+  // a service-role key exposed under a NEXT_PUBLIC_ name. Skipped for --dry-run
+  // because that path writes nothing and must stay usable with no config.
+  if (!DRY) assertEnv("write");
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY_ULIKA;
 

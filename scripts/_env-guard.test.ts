@@ -379,6 +379,7 @@ describe("declared wiring status matches reality", () => {
     "_env-guard.ts",
     "_env-guard.test.ts",
     "_environments.ts",
+    "_load-env.ts",
     "_scenario-source.ts",
     "_scenario-source.test.ts",
   ].sort();
@@ -406,13 +407,26 @@ describe("declared wiring status matches reality", () => {
     }
   });
 
-  it("is NOT yet called by any write tool — update the header when wiring lands", () => {
+  it("is called by every write tool", () => {
+    // Inverted when wiring landed. While it read "called by none", it was the
+    // thing that would fail the moment one of them started calling the guard;
+    // now it is the thing that fails if one of them stops.
     const callers = WRITE_TOOLS.filter((tool) =>
       /\bassertEnv\s*\(/.test(
         stripComments(readFileSync(join(process.cwd(), "scripts", tool), "utf8"))
       )
-    );
-    expect(callers).toEqual([]);
+    ).sort();
+    expect(callers).toEqual(WRITE_TOOLS);
+  });
+
+  it("loads .env.local before reading any of it", () => {
+    // tsx does not do this the way next dev does, so a correctly configured
+    // machine would otherwise look unconfigured and every tool would refuse.
+    for (const tool of WRITE_TOOLS) {
+      expect(readFileSync(join(process.cwd(), "scripts", tool), "utf8")).toContain(
+        'import "./_load-env"'
+      );
+    }
   });
 
   it("does not count a mention inside a comment as wiring", () => {
@@ -422,7 +436,8 @@ describe("declared wiring status matches reality", () => {
 
   it("keeps the header's own status line honest", () => {
     const header = readFileSync(join(process.cwd(), "scripts/_env-guard.ts"), "utf8");
-    expect(header).toContain("NOT YET CALLED BY ANY SCRIPT");
+    expect(header).toContain("WIRED.");
+    expect(header).not.toContain("NOT YET CALLED BY ANY SCRIPT");
   });
 });
 
@@ -530,11 +545,10 @@ describe("the committed env template stays a template", () => {
         )
     );
     expect(template.includes("NOT YET IN EFFECT")).toBe(!wired);
+    expect(template.includes("IN EFFECT.")).toBe(wired);
   });
 
-  it("warns that tsx does not load .env.local on its own", () => {
-    // Filling this file in correctly and still seeing "variable missing" is the
-    // most likely first experience once the guard is wired.
-    expect(template).toContain("does NOT load .env.local");
+  it("says who loads this file, since tsx does not do it by itself", () => {
+    expect(template).toContain("scripts/_load-env.ts loads this file");
   });
 });

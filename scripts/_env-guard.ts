@@ -21,27 +21,24 @@
  * or a database. `assertEnv()` is the four-line wrapper that reads the real
  * environment and throws.
  *
- * ── STATUS, read this before trusting it ────────────────────────────────────
- * NOT YET CALLED BY ANY SCRIPT. As of this commit `scripts/ingest-knowledge.ts`,
- * `scripts/ingest-scenarios.ts` and `scripts/register-source.ts` still build a
- * Supabase client straight from `process.env` and do not call `assertEnv()`.
- * This file is the contract; wiring it into those tools is a separate, later
- * step in the staging plan. Until that lands, nothing here protects anything —
- * do not read the paragraphs above as a description of current behaviour.
- * A test in `_env-guard.test.ts` pins the exact set of write tools and asserts
- * that none of them calls `assertEnv()`. It fails the moment one does, or the
- * moment a new script appears in `scripts/` — which forces a human to say
- * whether the newcomer touches the database. It is a text check over source,
- * not proof, and it cannot see a tool that reaches Supabase through a wrapper.
+ * ── STATUS ──────────────────────────────────────────────────────────────────
+ * WIRED. `scripts/ingest-knowledge.ts`, `scripts/ingest-scenarios.ts` and
+ * `scripts/register-source.ts` all call `assertEnv("write")` before they read
+ * any credential or construct a Supabase client. `scripts/_load-env.ts` loads
+ * `.env.local` first, because tsx does not do it the way `next dev` does.
  *
- * ONE THING THE WIRING COMMIT MUST HANDLE: `assertEnv()` reads `process.env`
- * and nothing else. Unlike `next dev`, `npx tsx scripts/...` does not load
- * `.env.local` on its own, so a machine with a correctly filled-in `.env.local`
- * would see every variable as missing and every tool would refuse. Wiring has
- * to load the file explicitly — `loadEnvConfig` from `@next/env` (present only
- * transitively today, so it would need to become a real devDependency), or a
- * documented `--env-file=.env.local`, or a documented requirement to export the
- * variables first. Picking one is part of that commit, not of this one.
+ * `--dry-run` deliberately does NOT go through the guard: those paths write
+ * nothing, and they must stay usable on a machine with no configuration at all.
+ *
+ * What this does and does not buy today: the staging allowlist in
+ * `_environments.ts` is EMPTY, so every one of these tools now refuses to write
+ * to any project whatsoever. That is the intended state until a staging project
+ * exists and its ref is added there in a reviewed commit. Turning writes back
+ * on is a repository change, not an `.env.local` edit.
+ *
+ * A test pins the exact set of write tools and asserts every one of them calls
+ * the guard. It is a text check over source, not proof, and it cannot see a
+ * tool that reaches Supabase through a wrapper.
  * ────────────────────────────────────────────────────────────────────────────
  */
 

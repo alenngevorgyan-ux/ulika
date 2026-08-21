@@ -10,7 +10,9 @@
  * Run: npx tsx scripts/ingest-scenarios.ts [--dry-run]
  */
 import { readFileSync } from "node:fs";
+import "./_load-env";
 import { createClient } from "@supabase/supabase-js";
+import { assertEnv } from "./_env-guard";
 import { embed } from "../src/lib/knowledge/embed";
 import { CANONICAL_SOURCE_PATH, parse } from "./_scenario-source";
 
@@ -145,6 +147,9 @@ async function main() {
     }
     return;
   }
+
+  // Everything below this line writes. --dry-run has already returned.
+  assertEnv("write");
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY_ULIKA;

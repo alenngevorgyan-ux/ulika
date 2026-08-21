@@ -8,7 +8,9 @@
  *
  * Run: npx tsx scripts/register-source.ts
  */
+import "./_load-env";
 import { createClient } from "@supabase/supabase-js";
+import { assertEnv } from "./_env-guard";
 import {
   verifyLicense,
   normaliseLicense,
@@ -95,6 +97,9 @@ const CANDIDATES: Candidate[] = [
 ];
 
 async function main() {
+  // This tool has no dry-run path — every invocation writes.
+  assertEnv("write");
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY_ULIKA;
   if (!url || !key) {
