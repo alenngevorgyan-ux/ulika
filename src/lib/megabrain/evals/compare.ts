@@ -156,7 +156,7 @@ export async function compareBlind(
     spec,
     usage: result.usage,
     latencyMs: result.latencyMs,
-    reportedModel: result.reportedModel,
+    telemetry: result.telemetry,
     reservedUsd: projectedUsd,
   });
 

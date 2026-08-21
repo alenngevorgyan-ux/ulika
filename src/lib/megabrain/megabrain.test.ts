@@ -12,7 +12,7 @@ import {
 import { CostLedger, MODE_CAPS, BudgetExceededError, AccountingError, assertUsableCost, RESERVATION_SAFETY_MARGIN, LEDGER_FIELDS, readUsage, projectPipelineCost } from "./costLedger";
 import { MODELS, CONFIGURATIONS, costOf, estimateTokens, modelFor, resolveConfiguration, SMOKE_BASELINE, type BaselineKind } from "./modelRouter";
 import { runCase, runBaseline, renderAnalysis, MAX_OUTPUT_TOKENS, StageRejectedError } from "./engine";
-import { parseJsonReply, type CompletionRequest } from "./transport";
+import { parseJsonReply, readTelemetry, type CompletionRequest } from "./transport";
 import { FROZEN_CASES } from "./evals/cases";
 import { gradeAnswer, summarise } from "./evals/graders";
 import { sideForEngine, stripFormatTells, summariseComparisons, WIN_RATE_THRESHOLD, STRUCTURAL_TELLS } from "./evals/compare";
@@ -925,6 +925,116 @@ describe("the ledger reports what actually happened, in order", () => {
     await runBaseline({ account: "x", ledger: benchmark.envelope(0.05) }, fixtureTransport({}));
     const stages = benchmark.allDeep().map((e) => e.stage);
     expect(stages).toEqual(["extract", "analyse", "strategise", "baseline"]);
+  });
+});
+
+describe("telemetry is a strict allowlist", () => {
+  const echo = "СЕКРЕТНЫЙ ТЕКСТ РАССКАЗА ПОЛЬЗОВАТЕЛЯ";
+
+  it("keeps only the named fields and drops everything else the provider sent", () => {
+    const t = readTelemetry({
+      id: "gen-abc123",
+      model: "x-ai/grok-4.3",
+      provider: "SpaceXAI",
+      service_tier: "default",
+      // Everything below must vanish. A filter that removes known-bad keys
+      // fails the first time a provider adds one; this copies by name instead.
+      choices: [{ message: { content: echo } }],
+      prompt: echo,
+      system_fingerprint: "fp_123",
+      metadata: { user_prompt: echo, trace: { messages: [echo] } },
+      error: { message: echo },
+    });
+    expect(Object.keys(t).sort()).toEqual([
+      "reportedModel", "responseId", "routingAttempts", "selectedProvider", "serviceTier",
+    ]);
+    expect(JSON.stringify(t)).not.toContain(echo);
+  });
+
+  it("takes provider and status from routing attempts and nothing else", () => {
+    const t = readTelemetry({
+      metadata: {
+        routing_attempts: [
+          { provider: "SpaceXAI", status: "ok", request_body: echo, latency: 12 },
+          { provider: "xai/priority", status: "price_filtered", error_message: echo },
+        ],
+      },
+    });
+    expect(t.routingAttempts).toEqual([
+      { provider: "SpaceXAI", status: "ok" },
+      { provider: "xai/priority", status: "price_filtered" },
+    ]);
+    expect(JSON.stringify(t.routingAttempts)).not.toContain(echo);
+  });
+
+  it("drops values that are too long or oddly shaped rather than truncating them", () => {
+    // Truncation would keep a prefix of whatever was there. Dropping keeps
+    // nothing, which is the only safe behaviour for a field we did not expect.
+    const t = readTelemetry({ id: "x".repeat(500), provider: { nested: echo }, service_tier: echo });
+    expect(t.responseId).toBeNull();
+    expect(t.selectedProvider).toBeNull();
+    expect(t.serviceTier).toBeNull();
+  });
+
+  it("returns all-null telemetry for an empty or hostile response", () => {
+    for (const raw of [null, undefined, {}, [], "string", 42]) {
+      const t = readTelemetry(raw);
+      expect(t.responseId).toBeNull();
+      expect(t.routingAttempts).toEqual([]);
+    }
+  });
+
+  it("asks the provider for routing metadata", () => {
+    const src = readFileSync(join(process.cwd(), "src/lib/megabrain/transport.ts"), "utf8");
+    expect(src).toContain('"X-OpenRouter-Metadata": "enabled"');
+  });
+
+  it("caps how many routing attempts are kept", () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ provider: `p${i}`, status: "ok" }));
+    expect(readTelemetry({ metadata: { routing_attempts: many } }).routingAttempts.length).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("the ledger carries the observability fields and only those", () => {
+  it("records attempt id, retry number, response id, models, provider and tier", async () => {
+    const ledger = new CostLedger("standard", 1);
+    await runCase({ account: "x", ledger }, fixtureTransport({}));
+    const [first] = ledger.allDeep();
+    expect(first.attemptId).toMatch(/^[0-9a-f]{12}$/);
+    expect(first.retryNumber).toBe(0);
+    expect(first.responseId).toMatch(/^gen-/);
+    expect(first.model).toBe("google/gemini-3.1-flash-lite");
+    expect(first.reportedModel).toBe("google/gemini-3.1-flash-lite");
+    expect(first.selectedProvider).toBe("Google Vertex");
+    expect(first.serviceTier).toBe("default");
+  });
+
+  it("numbers a retry as such", async () => {
+    const ledger = new CostLedger("standard", 1);
+    await runCase({ account: "x", ledger }, fixtureTransport({ strategiseGarbageFirst: true }));
+    const strategise = ledger.allDeep().filter((e) => e.stage === "strategise");
+    expect(strategise.map((e) => e.retryNumber)).toEqual([0, 1]);
+    // Distinct attempt ids, so the two are never conflated in a report.
+    expect(strategise[0].attemptId).not.toBe(strategise[1].attemptId);
+  });
+
+  it("reports schema validation per stage, and unparseable JSON per attempt", async () => {
+    const seen: { attemptId: string; stage: string; result: string }[] = [];
+    const ledger = new CostLedger("standard", 1);
+    ledger.onValidation = (v) => seen.push(v);
+    await runCase({ account: "x", ledger }, fixtureTransport({ strategiseGarbageFirst: true }));
+    expect(seen.some((v) => v.stage === "strategise" && v.result === "unparseable")).toBe(true);
+    expect(seen.filter((v) => v.result === "ok").map((v) => v.stage)).toContain("extract");
+  });
+
+  it("still carries no field outside the allowlist", async () => {
+    const ledger = new CostLedger("standard", 1);
+    const secret = "совершенносекретныйрассказ";
+    await runCase({ account: secret, ledger }, fixtureTransport({}));
+    for (const e of ledger.allDeep()) {
+      expect(Object.keys(e).sort()).toEqual([...LEDGER_FIELDS].sort());
+    }
+    expect(JSON.stringify(ledger.allDeep())).not.toContain(secret);
   });
 });
 

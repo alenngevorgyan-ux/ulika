@@ -1,5 +1,11 @@
 import type { CaseAnalysis } from "../schemas";
-import { ProviderHttpError, type CompletionRequest, type CompletionResult, type Transport } from "../transport";
+import {
+  ProviderHttpError,
+  type CompletionRequest,
+  type CompletionResult,
+  type ResponseTelemetry,
+  type Transport,
+} from "../transport";
 
 /**
  * Fixtures for every test in this module.
@@ -229,8 +235,21 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       }
       return r;
     };
-    const withModel = <T extends object>(r: T): T =>
-      opts.reportedModel ? ({ ...r, reportedModel: opts.reportedModel } as T) : r;
+    /** Realistic telemetry, so the allowlisted path is what tests exercise. */
+    const tel = (): ResponseTelemetry => ({
+      responseId: `gen-${Math.random().toString(16).slice(2, 10)}`,
+      reportedModel: opts.reportedModel ?? req.modelSlug,
+      selectedProvider: req.modelSlug.startsWith("x-ai") ? "SpaceXAI" : "Google Vertex",
+      serviceTier: "default",
+      routingAttempts: [{ provider: "SpaceXAI", status: "ok" }],
+    });
+    // Returns CompletionResult explicitly: inferring the generic from the
+    // partial left telemetry off the inferred type and the compiler was right
+    // to object.
+    const withModel = (r: Omit<CompletionResult, "telemetry">): CompletionResult => ({
+      ...r,
+      telemetry: tel(),
+    });
     if (opts.alwaysGarbage) return withModel(tamper({ content: "not json", usage: usage(100, 10), latencyMs: 5 }));
 
     const name = req.jsonSchema?.name;

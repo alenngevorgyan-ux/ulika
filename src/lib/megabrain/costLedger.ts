@@ -1,4 +1,5 @@
 import { costOf, estimateTokens, type ModelSpec } from "./modelRouter";
+import type { ResponseTelemetry } from "./transport";
 
 /**
  * Cost accounting and the hard guard that stops a run.
@@ -27,7 +28,10 @@ export const MODE_CAPS: Record<CaseMode, number> = {
 };
 
 export interface LedgerEntry {
+  /** Ours, minted before the request. Ties an attempt to its outcome locally. */
+  attemptId: string;
   provider: string;
+  /** The slug we ASKED for. Compare with reportedModel. */
   model: string;
   /** Pipeline stage, e.g. "extract". Never the content of that stage. */
   stage: string;
@@ -55,6 +59,19 @@ export interface LedgerEntry {
   conservativeEstimateUsd: number;
   /** Monotonic across the whole tree, so allDeep() can order truthfully. */
   seq: number;
+  /** 0 for a first attempt, 1 for its one permitted retry. */
+  retryNumber: number;
+  /** Provider's id for the generation; what /generations?id= accepts. */
+  responseId: string | null;
+  /** Model the provider says it served. */
+  reportedModel: string | null;
+  /** The endpoint that actually served it, e.g. "Google Vertex", "SpaceXAI". */
+  selectedProvider: string | null;
+  serviceTier: string | null;
+  /** Provider + short status per routing attempt. Nothing else from routing. */
+  routingAttempts: { provider: string; status: string }[];
+  /** Schema validation outcome for this stage's output, once it is known. */
+  validationResult: "ok" | "invalid" | "unparseable" | null;
   /**
    * Where the figure came from.
    *   provider   — the provider reported a charge.
@@ -78,6 +95,14 @@ export interface LedgerEntry {
 
 /** Fields permitted in an entry. Anything else is a leak; the test enforces it. */
 export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
+  "attemptId",
+  "retryNumber",
+  "responseId",
+  "reportedModel",
+  "selectedProvider",
+  "serviceTier",
+  "routingAttempts",
+  "validationResult",
   "provider",
   "model",
   "stage",
@@ -189,7 +214,22 @@ export class CostLedger {
    * worked and nothing about what died. The attempt line is what makes the
    * failing stage and slug identifiable at all.
    */
-  onAttempt?: (attempt: { stage: string; model: string; provider: string; reservedUsd: number }) => void;
+  onAttempt?: (attempt: {
+    attemptId: string;
+    retryNumber: number;
+    stage: string;
+    model: string;
+    provider: string;
+    reservedUsd: number;
+  }) => void;
+
+  /**
+   * Schema validation outcome, known only after the entry is written.
+   *
+   * Reported as its own event rather than mutating a recorded entry: a journal
+   * line that changes after being written is not a journal line.
+   */
+  onValidation?: (v: { attemptId: string; stage: string; result: "ok" | "invalid" | "unparseable" }) => void;
 
   constructor(
     readonly mode: CaseMode,
@@ -199,6 +239,7 @@ export class CostLedger {
     parent?.children.push(this);
     this.onRecord = parent?.onRecord;
     this.onAttempt = parent?.onAttempt;
+    this.onValidation = parent?.onValidation;
   }
 
   /**
@@ -281,7 +322,8 @@ export class CostLedger {
     stage: string,
     spec: ModelSpec,
     promptText: string,
-    maxOutputTokens: number
+    maxOutputTokens: number,
+    meta: { attemptId: string; retryNumber: number } = { attemptId: "unknown", retryNumber: 0 }
   ): { inputTokens: number; projectedUsd: number } {
     const inputTokens = estimateTokens(promptText);
     const projectedUsd = costOf(spec, inputTokens, maxOutputTokens) * RESERVATION_SAFETY_MARGIN;
@@ -292,6 +334,14 @@ export class CostLedger {
       this.ancestors().some((a) => a.budgetedSpendUsd + projectedUsd > a.capUsd);
     if (blocked) {
       this.entries.push({
+        attemptId: meta.attemptId,
+        retryNumber: meta.retryNumber,
+        responseId: null,
+        reportedModel: null,
+        selectedProvider: null,
+        serviceTier: null,
+        routingAttempts: [],
+        validationResult: null,
         provider: spec.provider,
         model: spec.slug,
         stage,
@@ -312,6 +362,8 @@ export class CostLedger {
       throw new BudgetExceededError(stage, this.budgetedSpendUsd + projectedUsd, this.capUsd);
     }
     this.onAttempt?.({
+      attemptId: meta.attemptId,
+      retryNumber: meta.retryNumber,
       stage,
       model: spec.slug,
       provider: spec.provider,
@@ -340,7 +392,9 @@ export class CostLedger {
     usage: ProviderUsage;
     latencyMs: number;
     /** Model the provider says it served. A mismatch means routing changed. */
-    reportedModel?: string;
+    telemetry?: ResponseTelemetry;
+    attemptId?: string;
+    retryNumber?: number;
     /** The reservation this call was made under, for the overcharge check. */
     reservedUsd?: number;
   }): LedgerEntry {
@@ -350,7 +404,8 @@ export class CostLedger {
     // provider has already charged for this call; refusing to record it because
     // the figure is wrong leaves a bill with no matching entry, which is worse
     // than an entry marked as unreliable.
-    const failure = classify(spec, usage, args.reportedModel, args.reservedUsd);
+    const t = args.telemetry;
+    const failure = classify(spec, usage, t?.reportedModel ?? undefined, args.reservedUsd);
     // Always the provider's figure: assertUsableCost above has already refused
     // anything else, so the "table" branch is unreachable for a recorded call.
     // The field stays because it documents provenance in the report and because
@@ -358,6 +413,14 @@ export class CostLedger {
     // not silently.
     const fromProvider = usage.actualCostUsd !== null;
     const entry: LedgerEntry = {
+      attemptId: args.attemptId ?? "unknown",
+      retryNumber: args.retryNumber ?? 0,
+      responseId: t?.responseId ?? null,
+      reportedModel: t?.reportedModel ?? null,
+      selectedProvider: t?.selectedProvider ?? null,
+      serviceTier: t?.serviceTier ?? null,
+      routingAttempts: t?.routingAttempts ?? [],
+      validationResult: null,
       provider: spec.provider,
       model: spec.slug,
       stage,

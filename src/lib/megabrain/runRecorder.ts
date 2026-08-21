@@ -98,8 +98,20 @@ export class RunRecorder {
    * and a bare "Provider request failed (404)", and the failing stage could not
    * be determined afterwards from either.
    */
-  readonly onAttempt = (a: { stage: string; model: string; provider: string; reservedUsd: number }): void => {
+  readonly onAttempt = (a: {
+    attemptId: string;
+    retryNumber: number;
+    stage: string;
+    model: string;
+    provider: string;
+    reservedUsd: number;
+  }): void => {
     this.line({ t: "attempt", at: new Date().toISOString(), ...a });
+  };
+
+  /** Schema validation outcome for a stage, or JSON parse outcome for an attempt. */
+  readonly onValidation = (v: { attemptId: string; stage: string; result: string }): void => {
+    this.line({ t: "validation", at: new Date().toISOString(), ...v });
   };
 
   /** Hook for CostLedger.onRecord. Called for every call and every refusal. */

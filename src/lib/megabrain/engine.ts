@@ -76,6 +76,25 @@ export class StageRejectedError extends Error {
   }
 }
 
+/**
+ * Emit the schema-validation outcome for a stage.
+ *
+ * The attempt id is not threaded here on purpose: validation is a property of
+ * the STAGE's assembled output, not of one HTTP attempt, and pretending
+ * otherwise would attach it to whichever attempt happened to be last.
+ */
+function reportValidation(
+  ledger: CostLedger,
+  stage: string,
+  results: { ok: boolean }[]
+): void {
+  ledger.onValidation?.({
+    attemptId: "",
+    stage,
+    result: results.every((r) => r.ok) ? "ok" : "invalid",
+  });
+}
+
 /** Stop the case when any validator refused. Reporting is not accepting. */
 function requireOk(stage: string, results: { ok: boolean; problems: string[] }[]): void {
   const problems = results.filter((r) => !r.ok).flatMap((r) => r.problems);
@@ -97,9 +116,15 @@ async function stage(
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
 
   for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
+    // Local id, minted before the request. Ties an attempt line to its outcome
+    // without depending on the provider returning anything.
+    const attemptId = randomBytes(6).toString("hex");
     // Reservation happens per attempt: a retry costs real money and must be
     // charged against the same cap, or the guard is trivially defeated by one.
-    const { projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens);
+    const { projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
+      attemptId,
+      retryNumber: attempt,
+    });
 
     const result = await transport({
       modelSlug: spec.slug,
@@ -118,11 +143,14 @@ async function stage(
       spec,
       usage: result.usage,
       latencyMs: result.latencyMs,
-      reportedModel: result.reportedModel,
+      telemetry: result.telemetry,
+      attemptId,
+      retryNumber: attempt,
       reservedUsd: projectedUsd,
     });
 
     const parsed = parseJsonReply(result.content);
+    ledger.onValidation?.({ attemptId, stage: name, result: parsed !== null ? "ok" : "unparseable" });
     if (parsed !== null) return parsed;
   }
   throw new Error(`Stage "${name}" returned no parseable JSON after ${MAX_JSON_RETRIES + 1} attempts.`);
@@ -170,6 +198,7 @@ export async function runCase(
   // ok, not value. Validators always return a value — that is what makes them
   // useful for reporting — so checking the value was a check that could never
   // fail, and put us back to "we got JSON and hoped".
+  reportValidation(ledger, "extract", [frame, actors]);
   requireOk("extract", [frame, actors]);
 
   // ---- two-call ablation: analysis and strategy merged into one call.
@@ -221,6 +250,7 @@ export async function runCase(
   const hypotheses = validateHypotheses(rawAnalyse.hypotheses);
   const leverage = validateLeverage(rawAnalyse.leverage);
   problems.push(...hypotheses.problems, ...leverage.problems);
+  reportValidation(ledger, "analyse", [hypotheses, leverage]);
   requireOk("analyse", [hypotheses, leverage]);
 
   // ---- stage 3: strategy, countermoves and the final plan
@@ -245,6 +275,7 @@ export async function runCase(
   const countermoves = validateCountermoves(rawPlan.countermoves);
   const plan = validatePlan(rawPlan.plan);
   problems.push(...strategies.problems, ...countermoves.problems, ...plan.problems);
+  reportValidation(ledger, "strategise", [strategies, countermoves, plan]);
   requireOk("strategise", [strategies, countermoves, plan]);
 
   return {
@@ -283,7 +314,11 @@ export async function runBaseline(
   );
   const system = baselinePrompt();
 
-  const { projectedUsd } = ledger.reserve("baseline", spec, system + input.account, MAX_OUTPUT_TOKENS.baseline);
+  const attemptId = randomBytes(6).toString("hex");
+  const { projectedUsd } = ledger.reserve(
+    "baseline", spec, system + input.account, MAX_OUTPUT_TOKENS.baseline,
+    { attemptId, retryNumber: 0 }
+  );
   const result = await transport({
     modelSlug: spec.slug,
     system,
@@ -297,7 +332,8 @@ export async function runBaseline(
     spec,
     usage: result.usage,
     latencyMs: result.latencyMs,
-    reportedModel: result.reportedModel,
+    telemetry: result.telemetry,
+    attemptId,
     reservedUsd: projectedUsd,
   });
   return { answer: result.content, ledger };

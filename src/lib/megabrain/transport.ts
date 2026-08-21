@@ -27,17 +27,35 @@ export interface CompletionRequest {
   timeoutMs?: number;
 }
 
+/**
+ * Everything we are willing to learn about a call, and nothing else.
+ *
+ * A STRICT ALLOWLIST, not a filter. Fields are named individually and copied one
+ * at a time; whatever else the provider returns is dropped without being looked
+ * at. The alternative — passing metadata through and removing known-bad keys —
+ * fails the first time a provider adds a field, and the field it adds could be
+ * an echo of the prompt.
+ *
+ * Never here: prompt, user text, completion, reasoning, summaries, error bodies,
+ * response headers, the key.
+ */
+export interface ResponseTelemetry {
+  /** Provider's own id for the generation. What /generations?id= takes. */
+  responseId: string | null;
+  /** Model the provider says it served. */
+  reportedModel: string | null;
+  /** Which endpoint actually served it, e.g. "Google Vertex". */
+  selectedProvider: string | null;
+  serviceTier: string | null;
+  /** Per-attempt routing outcomes: provider and a short status, nothing else. */
+  routingAttempts: { provider: string; status: string }[];
+}
+
 export interface CompletionResult {
   content: string;
   usage: ProviderUsage;
   latencyMs: number;
-  /**
-   * The model the provider says it actually served. OpenRouter may route to a
-   * different model than requested; when it does, every price we reserved
-   * against is wrong, so the caller refuses rather than accounting against a
-   * model it did not choose.
-   */
-  reportedModel?: string;
+  telemetry: ResponseTelemetry;
 }
 
 export type Transport = (req: CompletionRequest) => Promise<CompletionResult>;
@@ -82,6 +100,9 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
+          // Asks OpenRouter to return routing metadata. Only the allowlisted
+          // fields in readTelemetry() are ever read from it.
+          "X-OpenRouter-Metadata": "enabled",
         },
         signal: controller.signal,
         body: JSON.stringify({
@@ -143,22 +164,64 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         throw new ProviderHttpError(res.status, req.modelSlug, await errorCode(res));
       }
 
-      const data = (await res.json()) as {
-        choices?: { message?: { content?: string } }[];
-        model?: string;
-      };
-      const content = data.choices?.[0]?.message?.content;
+      const data = (await res.json()) as Record<string, unknown>;
+      const choices = data.choices as { message?: { content?: unknown } }[] | undefined;
+      const content = choices?.[0]?.message?.content;
       if (typeof content !== "string") throw new Error("Provider returned no message content.");
 
       return {
         content,
         usage: readUsage(data),
         latencyMs: Date.now() - started,
-        reportedModel: typeof data.model === "string" ? data.model : undefined,
+        telemetry: readTelemetry(data),
       };
     } finally {
       clearTimeout(timer);
     }
+  };
+}
+
+/** Short, enum-like, bounded. Anything longer or odder is dropped, not truncated. */
+function safeToken(v: unknown, max = 60): string | null {
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  const s = String(v).trim();
+  return s.length > 0 && s.length <= max && /^[\w .:\/-]+$/.test(s) ? s : null;
+}
+
+/**
+ * Copy the allowlisted telemetry fields out of a provider response.
+ *
+ * Every field is fetched by name. Nothing is spread, merged or iterated from the
+ * response object, so a field the provider adds tomorrow cannot arrive here by
+ * default — which matters because the thing it might add is an echo of the
+ * prompt.
+ */
+export function readTelemetry(raw: unknown): ResponseTelemetry {
+  const d = (raw ?? {}) as Record<string, unknown>;
+  const meta = (d.metadata ?? {}) as Record<string, unknown>;
+
+  const attemptsRaw = Array.isArray(meta.routing_attempts)
+    ? (meta.routing_attempts as unknown[])
+    : Array.isArray(meta.attempts)
+      ? (meta.attempts as unknown[])
+      : [];
+
+  const routingAttempts = attemptsRaw
+    .slice(0, 10)
+    .map((a) => {
+      const o = (a ?? {}) as Record<string, unknown>;
+      const provider = safeToken(o.provider ?? o.provider_name ?? o.name);
+      const status = safeToken(o.status ?? o.error_code ?? o.result, 40);
+      return provider && status ? { provider, status } : null;
+    })
+    .filter((a): a is { provider: string; status: string } => a !== null);
+
+  return {
+    responseId: safeToken(d.id, 80),
+    reportedModel: safeToken(d.model, 80),
+    selectedProvider: safeToken(d.provider ?? meta.provider ?? meta.provider_name),
+    serviceTier: safeToken(d.service_tier ?? meta.service_tier, 40),
+    routingAttempts,
   };
 }
 

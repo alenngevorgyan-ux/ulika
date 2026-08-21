@@ -157,6 +157,7 @@ async function live() {
   const runLedger = new CostLedger("standard", MAX_USD);
   runLedger.onRecord = recorder.onLedgerEntry;
   runLedger.onAttempt = recorder.onAttempt;
+  runLedger.onValidation = recorder.onValidation;
   const comparisons: ComparisonResult[] = [];
   const grades = [];
 
