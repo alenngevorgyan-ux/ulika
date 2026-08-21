@@ -33,7 +33,7 @@ alter table public.knowledge_sources
 -- Our own notes are not a licensing question.
 update public.knowledge_sources
 set license_status = 'not_applicable'
-where license_note like 'Original notes written for ULIKA%';
+where licence_note like 'Original notes written for ULIKA%';
 
 
 -- ------------------------------------------------------------- feedback ---
