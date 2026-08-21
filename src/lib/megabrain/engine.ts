@@ -99,7 +99,7 @@ async function stage(
   for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
     // Reservation happens per attempt: a retry costs real money and must be
     // charged against the same cap, or the guard is trivially defeated by one.
-    ledger.reserve(name, spec, system + user, maxOutputTokens);
+    const { projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens);
 
     const result = await transport({
       modelSlug: spec.slug,
@@ -109,7 +109,17 @@ async function stage(
       jsonSchema,
       temperature: 0.6,
     });
-    ledger.record({ stage: name, spec, usage: result.usage, latencyMs: result.latencyMs });
+    // Throws AccountingError on a malformed cost, an overcharge or a routing
+    // change. That stops the pipeline before the NEXT call; it cannot undo this
+    // one, and nothing here pretends otherwise.
+    ledger.record({
+      stage: name,
+      spec,
+      usage: result.usage,
+      latencyMs: result.latencyMs,
+      reportedModel: result.reportedModel,
+      reservedUsd: projectedUsd,
+    });
 
     const parsed = parseJsonReply(result.content);
     if (parsed !== null) return parsed;
@@ -130,7 +140,13 @@ export async function runCase(
   }
 
   const configuration = resolveConfiguration(input.configurationId);
-  const ledger = input.ledger ?? new CostLedger(mode, MODE_CAPS[mode]);
+  // The engine ALWAYS runs inside its own envelope capped at the mode's limit,
+  // even when a caller hands it a larger budget. A benchmark running at $0.15
+  // must not turn a Standard case into a $0.15 case: the outer number is a
+  // limit on the whole command, never a licence for one component.
+  const ledger = input.ledger
+    ? input.ledger.envelope(MODE_CAPS[mode], mode)
+    : new CostLedger(mode, MODE_CAPS[mode]);
   const problems: string[] = [];
   const sentinel = randomBytes(4).toString("hex");
   const account = fence("ACCOUNT", input.account, sentinel);
@@ -266,7 +282,7 @@ export async function runBaseline(
   );
   const system = baselinePrompt();
 
-  ledger.reserve("baseline", spec, system + input.account, MAX_OUTPUT_TOKENS.baseline);
+  const { projectedUsd } = ledger.reserve("baseline", spec, system + input.account, MAX_OUTPUT_TOKENS.baseline);
   const result = await transport({
     modelSlug: spec.slug,
     system,
@@ -274,7 +290,14 @@ export async function runBaseline(
     maxOutputTokens: MAX_OUTPUT_TOKENS.baseline,
     temperature: 0.7,
   });
-  ledger.record({ stage: "baseline", spec, usage: result.usage, latencyMs: result.latencyMs });
+  ledger.record({
+    stage: "baseline",
+    spec,
+    usage: result.usage,
+    latencyMs: result.latencyMs,
+    reportedModel: result.reportedModel,
+    reservedUsd: projectedUsd,
+  });
   return { answer: result.content, ledger };
 }
 

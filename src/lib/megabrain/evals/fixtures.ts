@@ -163,6 +163,16 @@ interface FixtureOptions {
   strategiseGarbageFirst?: boolean;
   /** Answer the merged two-call ablation schema. */
   combined?: boolean;
+  /**
+   * Return a cost field that is wrong in a specific way, from the first call.
+   * Wrapped in an object so that `{ value: undefined }` — a MISSING cost, which
+   * is one of the cases under test — is distinguishable from "do not tamper".
+   */
+  brokenCost?: { value: unknown };
+  /** Claim a different served model than the one requested. */
+  reportedModel?: string;
+  /** Report a charge far above what could have been reserved. */
+  overcharge?: boolean;
 }
 
 /**
@@ -176,6 +186,17 @@ const usage = (i: number, o: number, costUsd: number | null = 0.002) => ({
   reasoningTokens: 0,
   outputTokens: o,
   actualCostUsd: costUsd,
+  rawCost: costUsd,
+});
+
+/** Build a usage block whose cost field is wrong in one specific way. */
+export const brokenUsage = (raw: unknown) => ({
+  inputTokens: 100,
+  cachedTokens: 0,
+  reasoningTokens: 0,
+  outputTokens: 50,
+  actualCostUsd: typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null,
+  rawCost: raw,
 });
 
 /** A transport that never touches the network. */
@@ -185,48 +206,55 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
   return async (req): Promise<CompletionResult> => {
     opts.spy?.push(req);
     if (opts.callCount) opts.callCount.n++;
-    if (opts.alwaysGarbage) return { content: "not json", usage: usage(100, 10), latencyMs: 5 };
+    const tamper = <T extends { usage: unknown }>(r: T): T => {
+      if (opts.brokenCost) return { ...r, usage: brokenUsage(opts.brokenCost.value) };
+      if (opts.overcharge) return { ...r, usage: brokenUsage(9.99) };
+      return r;
+    };
+    const withModel = <T extends object>(r: T): T =>
+      opts.reportedModel ? ({ ...r, reportedModel: opts.reportedModel } as T) : r;
+    if (opts.alwaysGarbage) return withModel(tamper({ content: "not json", usage: usage(100, 10), latencyMs: 5 }));
 
     const name = req.jsonSchema?.name;
     if (name === "case_extraction") {
       extractCalls++;
       if (opts.extractReturnsGarbageFirst && extractCalls === 1) {
-        return { content: "sorry, here is prose", usage: usage(900, 20), latencyMs: 5 };
+        return withModel(tamper({ content: "sorry, here is prose", usage: usage(900, 20), latencyMs: 5 }));
       }
       const frame = opts.emptyFrame
         ? { ...GOOD_ANALYSIS.frame, documentedFacts: [], reportedFacts: [], interpretations: [] }
         : GOOD_ANALYSIS.frame;
-      return {
+      return withModel(tamper({
         content: JSON.stringify({ frame, actors: GOOD_ANALYSIS.actors }),
         usage: usage(900, 400, 0.002), latencyMs: 700,
-      };
+      }));
     }
     if (name === "case_analysis") {
       const hypotheses = opts.tooFewHypotheses
         ? { hypotheses: GOOD_ANALYSIS.hypotheses.hypotheses.slice(0, 2) }
         : GOOD_ANALYSIS.hypotheses;
       const leverage = opts.emptyLeverage ? { points: [] } : GOOD_ANALYSIS.leverage;
-      return {
+      return withModel(tamper({
         content: JSON.stringify({ hypotheses, leverage }),
         usage: usage(1200, 600, 0.02), latencyMs: 2200,
-      };
+      }));
     }
     if (name === "case_plan") {
       strategiseCalls++;
       if (opts.strategiseGarbageFirst && strategiseCalls === 1) {
-        return { content: "прошу прощения, вот текстом", usage: usage(1800, 30), latencyMs: 900 };
+        return withModel(tamper({ content: "прошу прощения, вот текстом", usage: usage(1800, 30), latencyMs: 900 }));
       }
-      return {
+      return withModel(tamper({
         content: JSON.stringify({
           strategies: GOOD_ANALYSIS.strategies,
           countermoves: GOOD_ANALYSIS.countermoves,
           plan: opts.planWithoutWords ? { ...GOOD_ANALYSIS.plan, exactWords: [] } : GOOD_ANALYSIS.plan,
         }),
         usage: usage(1800, 1100, 0.03), latencyMs: 4100,
-      };
+      }));
     }
     if (name === "case_analysis_and_plan") {
-      return {
+      return withModel(tamper({
         content: JSON.stringify({
           hypotheses: GOOD_ANALYSIS.hypotheses,
           leverage: GOOD_ANALYSIS.leverage,
@@ -235,10 +263,10 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
           plan: GOOD_ANALYSIS.plan,
         }),
         usage: usage(2500, 1600, 0.045), latencyMs: 5200,
-      };
+      }));
     }
 
     // Baseline or judge: free text.
-    return { content: BANAL_BASELINE, usage: usage(700, 200, 0.01), latencyMs: 1500 };
+    return withModel(tamper({ content: BANAL_BASELINE, usage: usage(700, 200, 0.01), latencyMs: 1500 }));
   };
 }

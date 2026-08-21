@@ -142,7 +142,7 @@ export async function compareBlind(
   ].join("\n");
 
   const ledger = deps.ledger ?? new CostLedger(deps.mode ?? "standard");
-  ledger.reserve("judge", spec, JUDGE_SYSTEM + user, 200);
+  const { projectedUsd } = ledger.reserve("judge", spec, JUDGE_SYSTEM + user, 200);
   const result = await deps.transport({
     modelSlug: spec.slug,
     system: JUDGE_SYSTEM,
@@ -150,7 +150,14 @@ export async function compareBlind(
     maxOutputTokens: 200,
     temperature: 0,
   });
-  ledger.record({ stage: "judge", spec, usage: result.usage, latencyMs: result.latencyMs });
+  ledger.record({
+    stage: "judge",
+    spec,
+    usage: result.usage,
+    latencyMs: result.latencyMs,
+    reportedModel: result.reportedModel,
+    reservedUsd: projectedUsd,
+  });
 
   let verdict: { winner?: string; reason?: string } = {};
   try {

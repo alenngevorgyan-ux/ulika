@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIGURATIONS } from "../src/lib/megabrain/modelRouter";
 import { MODELS } from "../src/lib/megabrain/modelRouter";
-import { MODE_CAPS, CostLedger } from "../src/lib/megabrain/costLedger";
+import { MODE_CAPS, CostLedger, AccountingError } from "../src/lib/megabrain/costLedger";
 import { benchmarkCost, engineCost, fitsStandardCap, scale } from "../src/lib/megabrain/costReport";
 import { renderAnalysis, runBaseline, runCase } from "../src/lib/megabrain/engine";
 import { createOpenRouterTransport } from "../src/lib/megabrain/transport";
@@ -76,6 +76,12 @@ async function dryRun() {
 
 /** Re-read prices from the live catalogue. Free, unauthenticated, no key. */
 async function verifyPrices() {
+  // Free and unauthenticated, but it IS a network call. Guarded so it can never
+  // run inside a "no network" check by accident.
+  if (!flag("allow-network")) {
+    console.error("verify-prices contacts openrouter.ai. Re-run with --allow-network to permit it.");
+    process.exit(1);
+  }
   const res = await fetch("https://openrouter.ai/api/v1/models");
   const data = (await res.json()) as { data: { id: string; pricing: { prompt: string; completion: string } }[] };
   const live = new Map(data.data.map((m) => [m.id, m.pricing]));
@@ -111,7 +117,13 @@ async function live() {
   }
 
   const cases = FROZEN_CASES.slice(0, Math.max(1, LIMIT));
-  const per = benchmarkCost(CONFIG_ID).total;
+  const bench = benchmarkCost(CONFIG_ID);
+  const per = {
+    reservedUsd: bench.total.reservedUsd,
+    expectedUsd: bench.total.expectedUsd,
+    baselineReserved: bench.baseline.reservedUsd,
+    judgeReserved: bench.judge.reservedUsd,
+  };
   // Gate on `reserved`: it is what the guard enforces per call. Using `absolute`
   // would refuse runs that can never actually cost that much; using `expected`
   // would start runs the guard then aborts halfway.
@@ -128,6 +140,9 @@ async function live() {
   }
 
   const transport = createOpenRouterTransport(key);
+  // The command's total. Every component runs inside its OWN envelope carved
+  // from this, so none of them can consume another's remainder, and the engine
+  // additionally cannot exceed the Standard cap whatever this number is.
   const runLedger = new CostLedger("standard", MAX_USD);
   const comparisons: ComparisonResult[] = [];
   const grades = [];
@@ -141,11 +156,15 @@ async function live() {
     // ONE ledger for the whole run. Engine stages, their retries, the baseline
     // and the judge all reserve against it before going out, so --max-usd is a
     // real ceiling rather than something checked after the money is gone.
+    // runCase carves its own $0.10 envelope from runLedger internally.
     const engine = await runCase(
       { account: c.account, configurationId: CONFIG_ID, ledger: runLedger },
       transport
     );
-    const base = await runBaseline({ account: c.account, ledger: runLedger }, transport);
+    const base = await runBaseline(
+      { account: c.account, ledger: runLedger.envelope(per.baselineReserved) },
+      transport
+    );
     const rendered = renderAnalysis(engine.analysis);
 
     grades.push({
@@ -155,7 +174,7 @@ async function live() {
 
     const verdict = await compareBlind(
       { caseId: c.id, account: c.account, engineAnswer: rendered, baselineAnswer: base.answer },
-      { transport, ledger: runLedger }
+      { transport, ledger: runLedger.envelope(per.judgeReserved) }
     );
     comparisons.push(verdict);
     console.log(`${verdict.winner}  (spent $${runLedger.spentUsd.toFixed(3)})`);
@@ -180,7 +199,7 @@ async function live() {
   mkdirSync(OUT_DIR, { recursive: true });
   const out = join(OUT_DIR, `megabrain-${Date.now()}.json`);
   // The ledger carries no conversation content, so the report is safe to keep.
-  writeFileSync(out, JSON.stringify({ config: CONFIG_ID, comparisons, cmp, engineVerdict, baselineVerdict, ledger: runLedger.all() }, null, 2));
+  writeFileSync(out, JSON.stringify({ config: CONFIG_ID, comparisons, cmp, engineVerdict, baselineVerdict, ledger: runLedger.allDeep() }, null, 2));
   console.log(`\nreport: ${out.replace(process.cwd(), ".")}`);
 }
 
@@ -191,6 +210,13 @@ async function main() {
 }
 
 main().catch((e) => {
+  if (e instanceof AccountingError) {
+    // Deliberately terse. A provider error body can quote the request, and the
+    // request contains the user's account.
+    console.error(`ACCOUNTING FAILURE — run stopped, case incomplete: ${e.message}`);
+    console.error("The charge for the call that triggered this had already happened.");
+    process.exit(2);
+  }
   console.error(e instanceof Error ? e.message : e);
   process.exit(1);
 });

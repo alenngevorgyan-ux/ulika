@@ -29,6 +29,13 @@ export interface CompletionResult {
   content: string;
   usage: ProviderUsage;
   latencyMs: number;
+  /**
+   * The model the provider says it actually served. OpenRouter may route to a
+   * different model than requested; when it does, every price we reserved
+   * against is wrong, so the caller refuses rather than accounting against a
+   * model it did not choose.
+   */
+  reportedModel?: string;
 }
 
 export type Transport = (req: CompletionRequest) => Promise<CompletionResult>;
@@ -83,11 +90,19 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         throw new Error(`Provider ${res.status}: ${body.slice(0, 300)}`);
       }
 
-      const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: string } }[];
+        model?: string;
+      };
       const content = data.choices?.[0]?.message?.content;
       if (typeof content !== "string") throw new Error("Provider returned no message content.");
 
-      return { content, usage: readUsage(data), latencyMs: Date.now() - started };
+      return {
+        content,
+        usage: readUsage(data),
+        latencyMs: Date.now() - started,
+        reportedModel: typeof data.model === "string" ? data.model : undefined,
+      };
     } finally {
       clearTimeout(timer);
     }

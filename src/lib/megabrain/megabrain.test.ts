@@ -6,7 +6,7 @@ import {
   validateFrame, validateHypotheses, validatePlan, validateStrategies,
   validateActors, validateLeverage, validateCountermoves, MIN_HYPOTHESES,
 } from "./schemas";
-import { CostLedger, MODE_CAPS, BudgetExceededError, LEDGER_FIELDS, readUsage, projectPipelineCost } from "./costLedger";
+import { CostLedger, MODE_CAPS, BudgetExceededError, AccountingError, assertUsableCost, RESERVATION_SAFETY_MARGIN, LEDGER_FIELDS, readUsage, projectPipelineCost } from "./costLedger";
 import { MODELS, CONFIGURATIONS, costOf, estimateTokens, modelFor, resolveConfiguration, SMOKE_BASELINE, type BaselineKind } from "./modelRouter";
 import { runCase, runBaseline, renderAnalysis, MAX_OUTPUT_TOKENS, StageRejectedError } from "./engine";
 import { parseJsonReply, type CompletionRequest } from "./transport";
@@ -70,7 +70,9 @@ describe("budget guard stops before spending, not after", () => {
     // Reserving against typical output is how a long generation walks the cap.
     const ledger = new CostLedger("standard");
     const { projectedUsd } = ledger.reserve("s", MODELS["claude-sonnet-5"], "short", 3000);
-    expect(projectedUsd).toBeCloseTo(costOf(MODELS["claude-sonnet-5"], estimateTokens("short"), 3000), 8);
+    expect(projectedUsd).toBeCloseTo(
+      costOf(MODELS["claude-sonnet-5"], estimateTokens("short"), 3000) * RESERVATION_SAFETY_MARGIN, 8
+    );
   });
   it("charges a retry against the same cap", async () => {
     // Two attempts at the same stage must both be reserved, or one retry
@@ -82,7 +84,7 @@ describe("budget guard stops before spending, not after", () => {
   it("reserves a retry as a second call, so it is never free", async () => {
     const shared = new CostLedger("standard", 1);
     await runCase({ account: "x", ledger: shared }, fixtureTransport({ strategiseGarbageFirst: true }));
-    expect(shared.all().filter((e) => e.stage === "strategise")).toHaveLength(2);
+    expect(shared.allDeep().filter((e) => e.stage === "strategise")).toHaveLength(2);
   });
 
   it("refuses the retry when accumulated spend leaves room for one attempt but not two", async () => {
@@ -91,7 +93,7 @@ describe("budget guard stops before spending, not after", () => {
     // boundary from a real run and then squeezes the budget just under it.
     const probe = new CostLedger("standard", 1);
     await runCase({ account: "x", ledger: probe }, fixtureTransport({ strategiseGarbageFirst: true }));
-    const entries = probe.all();
+    const entries = probe.allDeep();
     const spendBeforeRetry = entries
       .slice(0, entries.findIndex((e) => e.stage === "strategise") + 1)
       .reduce((n, e) => n + e.estimatedCostUsd, 0);
@@ -128,7 +130,7 @@ describe("the ledger records cost and nothing else", () => {
     const ledger = new CostLedger("standard");
     ledger.record({
       stage: "extract", spec: MODELS["grok-4.3"], latencyMs: 10,
-      usage: { inputTokens: 10, cachedTokens: 2, reasoningTokens: 0, outputTokens: 5, actualCostUsd: null },
+      usage: { inputTokens: 10, cachedTokens: 2, reasoningTokens: 0, outputTokens: 5, actualCostUsd: 0.001, rawCost: 0.001 },
     });
     expect(Object.keys(ledger.all()[0]).sort()).toEqual([...LEDGER_FIELDS].sort());
   });
@@ -148,26 +150,165 @@ describe("the ledger records cost and nothing else", () => {
     const ledger = new CostLedger("standard");
     const e = ledger.record({
       stage: "extract", spec: MODELS["claude-sonnet-5"], latencyMs: 1,
-      usage: { inputTokens: 1_000_000, cachedTokens: 900_000, reasoningTokens: 0, outputTokens: 0, actualCostUsd: 0.4 },
+      usage: { inputTokens: 1_000_000, cachedTokens: 900_000, reasoningTokens: 0, outputTokens: 0, actualCostUsd: 0.4, rawCost: 0.4 },
     });
     expect(e.estimatedCostUsd).toBe(0.4);
     expect(e.costSource).toBe("provider");
   });
 
-  it("falls back to the table and says so when the provider reports nothing", () => {
+  it("refuses to record a call the provider did not price, rather than estimating it", () => {
+    // There is no silent table fallback any more. Substituting an estimate for
+    // a real charge is exactly how a ledger drifts away from the bill.
     const ledger = new CostLedger("standard");
-    const e = ledger.record({
-      stage: "extract", spec: MODELS["claude-sonnet-5"], latencyMs: 1,
-      usage: { inputTokens: 1_000_000, cachedTokens: 0, reasoningTokens: 0, outputTokens: 0, actualCostUsd: null },
-    });
-    expect(e.costSource).toBe("table");
-    expect(e.estimatedCostUsd).toBe(MODELS["claude-sonnet-5"].inputPerMTok);
+    expect(() =>
+      ledger.record({
+        stage: "extract", spec: MODELS["claude-sonnet-5"], latencyMs: 1,
+        usage: { inputTokens: 1000, cachedTokens: 0, reasoningTokens: 0, outputTokens: 0, actualCostUsd: null, rawCost: undefined },
+      })
+    ).toThrow(/COST_MISSING/);
   });
 
   it("treats a malformed provider cost as absent rather than as zero", () => {
     for (const bad of [-1, Number.NaN, "0.5", null, undefined]) {
       expect(readUsage({ usage: { cost: bad } }).actualCostUsd).toBeNull();
     }
+  });
+});
+
+describe("a benchmark budget never relaxes the engine budget", () => {
+  it("keeps the engine inside $0.10 even when handed a $0.15 command budget", async () => {
+    // The hole this closes: the CLI passed its whole $0.15 ledger to the engine,
+    // so a Standard case became a $0.15 case merely because it was being
+    // benchmarked. The outer number limits the command; it is never a licence
+    // for one component inside it.
+    const benchmark = new CostLedger("standard", 0.15);
+    await runCase({ account: FROZEN_CASES[0].account, ledger: benchmark }, fixtureTransport({}));
+    const engineEnvelope = benchmark.all().length === 0;
+    expect(engineEnvelope).toBe(true); // engine spent inside a child, not here
+    expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
+  });
+
+  it("refuses an engine retry that would cross $0.10, with $0.05 still free on the command budget", async () => {
+    // Measured, not guessed: spend after the first strategise attempt plus the
+    // exact reservation that attempt required.
+    const probeSpy: CompletionRequest[] = [];
+    const probe = new CostLedger("standard", 1);
+    await runCase({ account: "x", ledger: probe }, fixtureTransport({ strategiseGarbageFirst: true, spy: probeSpy }));
+    const engineChild = probe.all().length === 0;
+    expect(engineChild).toBe(true);
+
+    const callCount = { n: 0 };
+    // Command budget deliberately generous; engine envelope deliberately tight.
+    const benchmark = new CostLedger("standard", 0.15);
+    const tight = benchmark.envelope(0.03);
+    await expect(
+      runCase({ account: "x", ledger: tight, mode: "quick" }, fixtureTransport({ strategiseGarbageFirst: true, callCount }))
+    ).rejects.toThrow(BudgetExceededError);
+    expect(benchmark.remainingUsd).toBeGreaterThan(0.05);
+    expect(callCount.n).toBeLessThan(4);
+  });
+
+  it("does not let the baseline or judge borrow the engine's remainder", async () => {
+    // Each component runs in its own envelope, so an unspent engine allowance
+    // is not a pool anything else can draw on.
+    const benchmark = new CostLedger("standard", 0.15);
+    const engineEnv = benchmark.envelope(0.1);
+    const baselineEnv = benchmark.envelope(0.01);
+    await runCase({ account: "x", ledger: engineEnv }, fixtureTransport({}));
+    await expect(
+      runBaseline({ account: "x", ledger: baselineEnv }, fixtureTransport({}))
+    ).rejects.toThrow(BudgetExceededError);
+  });
+
+  it("counts child spend against every ancestor", () => {
+    const parent = new CostLedger("standard", 0.1);
+    const child = parent.envelope(0.05);
+    child.record({
+      stage: "extract", spec: MODELS["grok-4.3"], latencyMs: 1,
+      usage: { inputTokens: 1, cachedTokens: 0, reasoningTokens: 0, outputTokens: 1, actualCostUsd: 0.02, rawCost: 0.02 },
+    });
+    expect(parent.spentUsd).toBeCloseTo(0.02, 6);
+    expect(parent.remainingUsd).toBeCloseTo(0.08, 6);
+  });
+
+  it("cannot carve an envelope larger than the parent can cover", () => {
+    const parent = new CostLedger("standard", 0.05);
+    expect(parent.envelope(0.2).capUsd).toBeCloseTo(0.05, 6);
+  });
+});
+
+describe("accounting fails closed", () => {
+  const cases: [string, unknown, string][] = [
+    ["missing", undefined, "COST_MISSING"],
+    ["null", null, "COST_MISSING"],
+    ["NaN", Number.NaN, "COST_NOT_FINITE"],
+    ["infinity", Number.POSITIVE_INFINITY, "COST_NOT_FINITE"],
+    ["negative", -0.01, "COST_NEGATIVE"],
+    ["string", "0.01", "COST_NOT_A_NUMBER"],
+  ];
+
+  it.each(cases)("stops the pipeline when the provider cost is %s", async (_label, raw, code) => {
+    await expect(
+      runCase({ account: "x" }, fixtureTransport({ brokenCost: { value: raw } }))
+    ).rejects.toThrow(new RegExp(code));
+  });
+
+  it("stops after ONE call, so no further stage is charged", async () => {
+    const callCount = { n: 0 };
+    await expect(
+      runCase({ account: "x" }, fixtureTransport({ brokenCost: { value: undefined }, callCount }))
+    ).rejects.toThrow(AccountingError);
+    expect(callCount.n).toBe(1);
+  });
+
+  it("refuses a charge above what was reserved", async () => {
+    await expect(
+      runCase({ account: "x" }, fixtureTransport({ overcharge: true }))
+    ).rejects.toThrow(/COST_ABOVE_RESERVED/);
+  });
+
+  it("refuses when the provider served a different model than requested", async () => {
+    await expect(
+      runCase({ account: "x" }, fixtureTransport({ reportedModel: "some/other-model" }))
+    ).rejects.toThrow(/MODEL_MISMATCH/);
+  });
+
+  it("never retries after an accounting failure", async () => {
+    const callCount = { n: 0 };
+    await expect(
+      runCase({ account: "x" }, fixtureTransport({ overcharge: true, callCount }))
+    ).rejects.toThrow(AccountingError);
+    expect(callCount.n).toBe(1);
+  });
+
+  it("carries no provider body and no user text in the error", async () => {
+    const secret = "уникальнаястрокаизрассказа";
+    try {
+      await runCase({ account: secret }, fixtureTransport({ brokenCost: { value: "0.01" } }));
+      throw new Error("should have thrown");
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("COST_NOT_A_NUMBER");
+      expect(msg).not.toContain(secret);
+    }
+  });
+
+  it("classifies each failure distinctly rather than reporting one generic error", () => {
+    expect(() => assertUsableCost("s", undefined)).toThrow(/COST_MISSING/);
+    expect(() => assertUsableCost("s", "1")).toThrow(/COST_NOT_A_NUMBER/);
+    expect(() => assertUsableCost("s", -1)).toThrow(/COST_NEGATIVE/);
+    expect(assertUsableCost("s", 0.5)).toBe(0.5);
+  });
+});
+
+describe("reservations carry a safety margin", () => {
+  it("reserves more than the nominal table price", () => {
+    const ledger = new CostLedger("standard", 1);
+    const { projectedUsd } = ledger.reserve("s", MODELS["claude-sonnet-5"], "x", 1000);
+    expect(projectedUsd).toBeCloseTo(costOf(MODELS["claude-sonnet-5"], estimateTokens("x"), 1000) * RESERVATION_SAFETY_MARGIN, 8);
+  });
+  it("uses a margin above 1, since max_tokens bounding all billed output is unproven", () => {
+    expect(RESERVATION_SAFETY_MARGIN).toBeGreaterThan(1);
   });
 });
 
@@ -185,16 +326,19 @@ describe("a Standard case never actually exceeds $0.10", () => {
     const probeSpy: CompletionRequest[] = [];
     const probe = new CostLedger("standard", 1);
     await runCase({ account: "x", ledger: probe }, fixtureTransport({ strategiseGarbageFirst: true, spy: probeSpy }));
-    const entries = probe.all();
+    const entries = probe.allDeep();
     const spendBeforeRetry = entries
       .slice(0, entries.findIndex((e) => e.stage === "strategise") + 1)
       .reduce((n, e) => n + e.estimatedCostUsd, 0);
     const strategiseCall = probeSpy.find((r) => r.jsonSchema?.name === "case_plan")!;
-    const retryReservation = costOf(
-      modelFor(resolveConfiguration(), "strategise"),
-      estimateTokens(strategiseCall.system + strategiseCall.user),
-      MAX_OUTPUT_TOKENS.strategise
-    );
+    // Includes the same safety margin the guard applies, or the cap lands
+    // outside the narrow window where attempt one fits and the retry does not.
+    const retryReservation =
+      costOf(
+        modelFor(resolveConfiguration(), "strategise"),
+        estimateTokens(strategiseCall.system + strategiseCall.user),
+        MAX_OUTPUT_TOKENS.strategise
+      ) * RESERVATION_SAFETY_MARGIN;
 
     const callCount = { n: 0 };
     const shared = new CostLedger("standard", spendBeforeRetry + retryReservation - 0.0001);
@@ -210,7 +354,7 @@ describe("a Standard case never actually exceeds $0.10", () => {
   it("records the refusal in the ledger rather than failing silently", async () => {
     const probe = new CostLedger("standard", 1);
     await runCase({ account: "x", ledger: probe }, fixtureTransport({ strategiseGarbageFirst: true }));
-    const entries = probe.all();
+    const entries = probe.allDeep();
     const spendBeforeRetry = entries
       .slice(0, entries.findIndex((e) => e.stage === "strategise") + 1)
       .reduce((n, e) => n + e.estimatedCostUsd, 0);
@@ -218,7 +362,7 @@ describe("a Standard case never actually exceeds $0.10", () => {
     try {
       await runCase({ account: "x", ledger: shared }, fixtureTransport({ strategiseGarbageFirst: true }));
     } catch { /* expected */ }
-    expect(shared.all().some((e) => e.stoppedByBudgetGuard)).toBe(true);
+    expect(shared.allDeep().some((e) => e.stoppedByBudgetGuard)).toBe(true);
   });
 
   it("keeps total spend under the Standard cap on the Sonnet configuration", async () => {
@@ -284,7 +428,7 @@ describe("a dangerous plan never survives as text", () => {
     const surfaces = [
       JSON.stringify(res.analysis.plan),
       renderAnalysis(res.analysis),
-      JSON.stringify(shared.all()),
+      JSON.stringify(shared.allDeep()),
       JSON.stringify(res.problems),
     ];
     for (const s of surfaces) expect(s).not.toContain(dangerous);
@@ -386,9 +530,9 @@ describe("the run-level cap is global, not per case", () => {
   it("shares one ledger across engine, baseline and judge", async () => {
     const shared = new CostLedger("standard", 1);
     await runCase({ account: FROZEN_CASES[0].account, ledger: shared }, fixtureTransport({}));
-    const afterEngine = shared.all().length;
+    const afterEngine = shared.allDeep().length;
     await runBaseline({ account: FROZEN_CASES[0].account, ledger: shared }, fixtureTransport({}));
-    expect(shared.all().length).toBeGreaterThan(afterEngine);
+    expect(shared.allDeep().length).toBeGreaterThan(afterEngine);
   });
 
   it("refuses the next call once the shared budget is nearly gone", async () => {

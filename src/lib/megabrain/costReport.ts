@@ -1,6 +1,6 @@
 import { costOf, modelFor, resolveConfiguration, MODELS, type ModelSpec } from "./modelRouter";
 import { MAX_OUTPUT_TOKENS } from "./engine";
-import { MODE_CAPS } from "./costLedger";
+import { MODE_CAPS, RESERVATION_SAFETY_MARGIN } from "./costLedger";
 
 /**
  * The single canonical cost calculation.
@@ -44,7 +44,9 @@ const chars = (n: number) => Math.ceil(n / 3);
 
 function call(spec: ModelSpec, promptChars: number, maxOut: number, retryable: boolean): Bound {
   const input = chars(promptChars);
-  const reserved = costOf(spec, input, maxOut);
+  // Same margin the guard applies, or the report would describe a reservation
+  // the guard does not actually make.
+  const reserved = costOf(spec, input, maxOut) * RESERVATION_SAFETY_MARGIN;
   return {
     expectedUsd: costOf(spec, input, Math.ceil(maxOut * EXPECTED_OUTPUT_RATIO)),
     reservedUsd: reserved,

@@ -62,6 +62,42 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
   "stoppedByBudgetGuard",
 ];
 
+/**
+ * Accounting refused to continue. Distinct from BudgetExceededError: that one
+ * fires BEFORE a request and prevents a charge; this one fires AFTER a charge
+ * that has already happened and stops everything downstream.
+ *
+ * Carries no provider body and no user text — a provider error can quote the
+ * request, and the request contains the account.
+ */
+export class AccountingError extends Error {
+  constructor(readonly stage: string, readonly code: AccountingFailure, detail = "") {
+    super(`Accounting refused after "${stage}": ${code}${detail ? ` (${detail})` : ""}`);
+    this.name = "AccountingError";
+  }
+}
+
+export type AccountingFailure =
+  | "COST_MISSING"
+  | "COST_NOT_FINITE"
+  | "COST_NEGATIVE"
+  | "COST_NOT_A_NUMBER"
+  | "COST_ABOVE_RESERVED"
+  | "MODEL_MISMATCH"
+  | "UNKNOWN_MODEL";
+
+/**
+ * Applied on top of every reservation.
+ *
+ * `max_tokens` bounds the completion, but whether it bounds every BILLED output
+ * token — reasoning included — is not something this repository can prove about
+ * a provider it does not control. Rather than assert a hard dollar ceiling we
+ * cannot demonstrate, reservations are inflated so that a moderate
+ * under-estimate still lands inside the cap, and the residual risk of the ONE
+ * request already in flight is documented rather than denied.
+ */
+export const RESERVATION_SAFETY_MARGIN = 1.35;
+
 export class BudgetExceededError extends Error {
   constructor(
     readonly stage: string,
@@ -79,19 +115,64 @@ export class BudgetExceededError extends Error {
 
 export class CostLedger {
   private readonly entries: LedgerEntry[] = [];
+  private readonly children: CostLedger[] = [];
 
-  constructor(readonly mode: CaseMode, readonly capUsd: number = MODE_CAPS[mode]) {}
+  /**
+   * A ledger may have a PARENT. Spend on a child counts against the parent too,
+   * and a reservation must fit BOTH.
+   *
+   * This is the fix for a real hole: the benchmark handed one $0.15 ledger to
+   * the engine, so a Standard case — capped at $0.10 by product policy — could
+   * spend up to $0.15 simply because it was being benchmarked. A larger outer
+   * budget must never relax an inner one, and separate envelopes for engine,
+   * baseline and judge additionally stop any of them consuming another's
+   * remainder.
+   */
+  constructor(
+    readonly mode: CaseMode,
+    readonly capUsd: number = MODE_CAPS[mode],
+    readonly parent?: CostLedger
+  ) {
+    parent?.children.push(this);
+  }
 
+  /**
+   * Carve a sub-budget. The child's cap is the smaller of what was asked for
+   * and what the parent still has, so an envelope can never promise money the
+   * parent cannot cover.
+   */
+  envelope(cap: number, mode: CaseMode = this.mode): CostLedger {
+    return new CostLedger(mode, Math.min(cap, this.remainingUsd), this);
+  }
+
+  /** Own spend plus everything spent by envelopes carved from this ledger. */
   get spentUsd(): number {
-    return this.entries.reduce((sum, e) => sum + (e.stoppedByBudgetGuard ? 0 : e.estimatedCostUsd), 0);
+    const own = this.entries.reduce(
+      (sum, e) => sum + (e.stoppedByBudgetGuard ? 0 : e.estimatedCostUsd),
+      0
+    );
+    return own + this.children.reduce((sum, c) => sum + c.spentUsd, 0);
   }
 
   get remainingUsd(): number {
     return Math.max(0, this.capUsd - this.spentUsd);
   }
 
+  /** This ledger's own entries. Excludes envelopes carved from it. */
   all(): readonly LedgerEntry[] {
     return this.entries;
+  }
+
+  /**
+   * Every entry, this ledger's and its envelopes', in the order they happened.
+   *
+   * Needed because spend moved into child envelopes: a report reading only
+   * `all()` on the command budget would show an empty ledger and a real bill.
+   */
+  allDeep(): LedgerEntry[] {
+    return [...this.entries, ...this.children.flatMap((c) => c.allDeep())].sort((a, b) =>
+      a.stage.localeCompare(b.stage)
+    );
   }
 
   /**
@@ -109,8 +190,13 @@ export class CostLedger {
     maxOutputTokens: number
   ): { inputTokens: number; projectedUsd: number } {
     const inputTokens = estimateTokens(promptText);
-    const projectedUsd = costOf(spec, inputTokens, maxOutputTokens);
-    if (this.spentUsd + projectedUsd > this.capUsd) {
+    const projectedUsd = costOf(spec, inputTokens, maxOutputTokens) * RESERVATION_SAFETY_MARGIN;
+    // Must fit this budget AND every budget above it. Checking only the nearest
+    // one is how a child envelope silently overruns its parent.
+    const blocked =
+      this.spentUsd + projectedUsd > this.capUsd ||
+      this.ancestors().some((a) => a.spentUsd + projectedUsd > a.capUsd);
+    if (blocked) {
       this.entries.push({
         provider: spec.provider,
         model: spec.slug,
@@ -130,16 +216,46 @@ export class CostLedger {
     return { inputTokens, projectedUsd };
   }
 
-  /** Record a completed call from the provider's own usage numbers. */
+  private ancestors(): CostLedger[] {
+    const out: CostLedger[] = [];
+    for (let p = this.parent; p; p = p.parent) out.push(p);
+    return out;
+  }
+
+  /**
+   * Record a completed call from the provider's own usage numbers.
+   *
+   * FAIL-CLOSED, and honest about what that can and cannot do. Everything here
+   * runs AFTER the provider has already charged, so it cannot prevent the first
+   * overcharge — it can only stop the pipeline before the next one. Saying
+   * otherwise would be the false guarantee this system keeps being audited for.
+   */
   record(args: {
     stage: string;
     spec: ModelSpec;
     usage: ProviderUsage;
     latencyMs: number;
+    /** Model the provider says it served. A mismatch means routing changed. */
+    reportedModel?: string;
+    /** The reservation this call was made under, for the overcharge check. */
+    reservedUsd?: number;
   }): LedgerEntry {
     const { stage, spec, usage, latencyMs } = args;
-    // Provider's own figure wins. The static table is a preflight instrument,
-    // not an accounting one: it cannot see cache discounts or provider routing.
+
+    if (args.reportedModel && args.reportedModel !== spec.slug) {
+      // A silent fallback to another model invalidates every price we reserved
+      // against, so continuing would be accounting against fiction.
+      throw new AccountingError(stage, "MODEL_MISMATCH");
+    }
+    assertUsableCost(stage, usage.rawCost);
+    if (args.reservedUsd !== undefined && (usage.actualCostUsd ?? 0) > args.reservedUsd) {
+      throw new AccountingError(stage, "COST_ABOVE_RESERVED");
+    }
+    // Always the provider's figure: assertUsableCost above has already refused
+    // anything else, so the "table" branch is unreachable for a recorded call.
+    // The field stays because it documents provenance in the report and because
+    // a future provider without cost reporting would need it back deliberately,
+    // not silently.
     const fromProvider = usage.actualCostUsd !== null;
     const entry: LedgerEntry = {
       provider: spec.provider,
@@ -167,6 +283,8 @@ export interface ProviderUsage {
   cachedTokens: number;
   reasoningTokens: number;
   outputTokens: number;
+  /** The unvalidated value, kept so the validator can classify how it is wrong. */
+  rawCost: unknown;
   /**
    * What the provider says it actually charged, when it says so.
    *
@@ -196,6 +314,7 @@ export function readUsage(raw: unknown): ProviderUsage {
   // than coerced, so a malformed field cannot become a zero charge.
   const cost =
     typeof u.cost === "number" && Number.isFinite(u.cost) && u.cost >= 0 ? u.cost : null;
+  const rawCost = "cost" in u ? u.cost : undefined;
   return {
     inputTokens: n(u.prompt_tokens),
     cachedTokens: n(details.cached_tokens),
@@ -204,7 +323,23 @@ export function readUsage(raw: unknown): ProviderUsage {
     reasoningTokens: n(outDetails.reasoning_tokens),
     outputTokens: n(u.completion_tokens),
     actualCostUsd: cost,
+    rawCost,
   };
+}
+
+/**
+ * Classify a provider cost figure, or refuse.
+ *
+ * Every rejected shape gets its own code so the report can say WHICH way the
+ * provider surprised us. "Something was wrong with the cost" is not actionable
+ * at the moment a run stops.
+ */
+export function assertUsableCost(stage: string, raw: unknown): number {
+  if (raw === undefined || raw === null) throw new AccountingError(stage, "COST_MISSING");
+  if (typeof raw !== "number") throw new AccountingError(stage, "COST_NOT_A_NUMBER");
+  if (Number.isNaN(raw) || !Number.isFinite(raw)) throw new AccountingError(stage, "COST_NOT_FINITE");
+  if (raw < 0) throw new AccountingError(stage, "COST_NEGATIVE");
+  return raw;
 }
 
 /** Whole-pipeline projection, used by the dry-run simulator and by preflight. */

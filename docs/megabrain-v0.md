@@ -76,6 +76,49 @@ Three bounds, and conflating them is what caused that:
 Run `--dry-run` for the current table; it prints product runtime (engine only)
 and benchmark (engine + baseline + judge) separately, at 1 / 2 / 5 / 20 cases.
 
+### Two budgets, nested
+
+A benchmark budget must never relax the engine's. Earlier the CLI handed its
+whole `--max-usd` ledger to `runCase`, so a Standard case — capped at $0.10 by
+product policy — could spend $0.15 merely because it was being benchmarked.
+
+Now every component runs in its own envelope carved from the command budget:
+
+- **engine envelope**: `$0.10` regardless of the command budget. Covers extract,
+  analyse, strategise and any engine retry.
+- **baseline envelope** and **judge envelope**: separate, sized from the cost
+  report.
+
+A reservation must fit its own envelope *and* every budget above it, and child
+spend counts against all ancestors. Nothing can borrow another component's
+remainder, and an envelope can never be carved larger than the parent can cover.
+
+### What can be guaranteed before a request, and what can only be detected after
+
+Worth stating precisely, because the difference is where the residual risk lives.
+
+**Before** a request the guard controls the reservation, and refuses to send
+anything whose conservative envelope would breach a budget. That prevents a
+charge from happening.
+
+**After** a request, accounting checks the provider's own `usage.cost` and the
+served model. If the cost is missing, non-numeric, NaN, infinite, negative, or
+above what was reserved — or the provider served a different model than
+requested — the run stops, no further stage is called, no retry is issued, and
+the process exits non-zero.
+
+**That check cannot undo the charge it detects.** It stops the *next* call, not
+the one that already happened. Nothing here is a guarantee against a single
+overcharged request, and calling it one would be the false certainty this
+project keeps being audited for.
+
+Reservations therefore carry a safety margin above the nominal table price.
+`max_tokens` bounds the completion, but whether it bounds every *billed* output
+token — reasoning included — is not something this repository can prove about a
+provider it does not control. The margin absorbs a moderate under-estimate; a
+provider-side spend limit is the only thing that bounds the pathological case,
+and it is required rather than optional.
+
 ### Retries are best-effort, not guaranteed
 
 A Standard case never exceeds $0.10. If the remaining budget cannot cover the
