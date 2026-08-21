@@ -32,6 +32,11 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...except the template, which carries variable NAMES and empty values only.
+# Without this negation the `.env*` rule above silently swallows it, and the
+# README's `cp .env.local.example .env.local` has nothing to copy in a fresh
+# clone. Verify with: git check-ignore -v .env.local.example
+!.env.local.example
 
 # vercel
 .vercel
