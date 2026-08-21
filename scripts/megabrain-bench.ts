@@ -37,6 +37,16 @@ const LIMIT = Number(value("limit", "5"));
 const MAX_USD = Number(value("max-usd", "0"));
 const OUT_DIR = fileURLToPath(new URL("../bench", import.meta.url));
 
+/**
+ * Worst case, and it must mean worst case.
+ *
+ * Every structured stage may run twice — one retry is allowed for unparseable
+ * JSON — so a projection counting each stage once is not a ceiling. It is
+ * doubled here. An earlier version quoted the single-pass number as "worst
+ * case", which would have understated a run by up to a factor of two.
+ */
+const RETRY_FACTOR = 2;
+
 function projectOne(configId: string) {
   const cfg = resolveConfiguration(configId);
   return projectPipelineCost([
@@ -46,9 +56,14 @@ function projectOne(configId: string) {
   ]);
 }
 
+function projectOneWorstCase(configId: string) {
+  const p = projectOne(configId);
+  return { ...p, totalUsd: p.totalUsd * RETRY_FACTOR };
+}
+
 /** Worst case per case: engine + baseline + judge, all at their ceilings. */
 function projectPerCase(configId: string) {
-  const engine = projectOne(configId).totalUsd;
+  const engine = projectOneWorstCase(configId).totalUsd;
   const baseline = projectPipelineCost([
     { stage: "baseline", spec: MODELS["claude-sonnet-5"], promptChars: 4000, maxOutputTokens: MAX_OUTPUT_TOKENS.baseline },
   ]).totalUsd;
@@ -60,14 +75,20 @@ function projectPerCase(configId: string) {
 
 async function dryRun() {
   console.log("DRY RUN — no requests, no cost.\n");
-  console.log("Per-case projection, at output ceilings (the guard reserves against these):\n");
+  console.log("Per-case projection, at output ceilings.\n");
+  console.log("Two numbers, and the difference matters. The single pass is every stage");
+  console.log("once at its maximum output. The absolute ceiling additionally assumes every");
+  console.log("stage needed its one retry — a conjunction that should be rare. At runtime the");
+  console.log("guard reserves against ACTUAL accumulated spend, so the ceiling is a planning");
+  console.log("bound, not a prediction.\n");
   for (const id of Object.keys(CONFIGURATIONS)) {
-    const p = projectOne(id);
+    const p = projectOneWorstCase(id);
     const cap = MODE_CAPS.standard;
-    const stages = p.perStage.map((s) => `${s.stage} $${s.usd.toFixed(4)}`).join("  ");
+    const single = projectOne(id).totalUsd;
     console.log(
-      `  ${id.padEnd(22)} ${stages}  =  $${p.totalUsd.toFixed(4)}  ` +
-        `${p.totalUsd <= cap ? "OK" : "OVER CAP"} (standard cap $${cap})`
+      `  ${id.padEnd(22)} single pass $${single.toFixed(4)}  ` +
+        `absolute ceiling (every stage retried) $${p.totalUsd.toFixed(4)}  ` +
+        `${single <= cap ? "single pass OK" : "SINGLE PASS OVER CAP"}`
     );
   }
   const per = projectPerCase(CONFIG_ID);
@@ -140,8 +161,14 @@ async function live() {
       break;
     }
     process.stdout.write(`${c.id} … `);
-    const engine = await runCase({ account: c.account, configurationId: CONFIG_ID }, transport);
-    const base = await runBaseline({ account: c.account }, transport);
+    // ONE ledger for the whole run. Engine stages, their retries, the baseline
+    // and the judge all reserve against it before going out, so --max-usd is a
+    // real ceiling rather than something checked after the money is gone.
+    const engine = await runCase(
+      { account: c.account, configurationId: CONFIG_ID, ledger: runLedger },
+      transport
+    );
+    const base = await runBaseline({ account: c.account, ledger: runLedger }, transport);
     const rendered = renderAnalysis(engine.analysis);
 
     grades.push({
@@ -154,16 +181,6 @@ async function live() {
       { transport, ledger: runLedger }
     );
     comparisons.push(verdict);
-
-    // Fold per-case spend into the run ledger so the limit is global.
-    for (const e of [...engine.ledger.all(), ...base.ledger.all()]) {
-      runLedger.record({
-        stage: e.stage,
-        spec: Object.values(MODELS).find((m) => m.slug === e.model)!,
-        usage: { inputTokens: e.inputTokens, cachedTokens: e.cachedTokens, reasoningTokens: e.reasoningTokens, outputTokens: e.outputTokens },
-        latencyMs: e.latencyMs,
-      });
-    }
     console.log(`${verdict.winner}  (spent $${runLedger.spentUsd.toFixed(3)})`);
   }
 

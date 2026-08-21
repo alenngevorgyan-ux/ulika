@@ -174,12 +174,46 @@ Answer in the language of the account. JSON only.
 Sentinel for this request: ${sentinel}`;
 }
 
-/** The single-call baseline gets the same situation and no structure at all. */
+/**
+ * The baseline.
+ *
+ * It gets the SAME outcome contract as the engine — competing readings, cheap
+ * tests, leverage, the other side's response, verbatim words, if/then, stop
+ * signals, and the same safety boundary — and the same situation. What it does
+ * NOT get is the structure: one call, free text, no schema, no staged state.
+ *
+ * That is the whole point of the comparison. An earlier version gave it a short
+ * generic "be a good adviser" prompt, which would have measured "a detailed
+ * three-stage contract beats a vague one-liner" — true, uninteresting, and not
+ * the claim being tested. If the engine cannot beat a single call that was
+ * asked for the same things, the structure is not earning its cost, and that is
+ * a result worth getting honestly.
+ */
 export function baselinePrompt(): string {
-  return `You are a sharp, experienced strategic adviser for difficult human
-situations at work and in personal life. You notice what others miss, you
-separate what is known from what is assumed, and you give concrete, usable
-advice rather than platitudes. You never recommend anything unlawful, and you
-never claim to detect lying from body language. Answer in the language the
-person writes in. Be specific and give them something they can actually do.`;
+  return `Ты — сильный стратег по трудным человеческим ситуациям на работе и в
+личной жизни. Тебе описывают реальную ситуацию, и человек завтра пойдёт и будет
+действовать по твоему ответу.
+
+Отделяй проверенное от того, что человек лишь предполагает, и не выдумывай фактов,
+которых нет в рассказе. Если чего-то решающего не хватает — скажи об этом и
+сделай выяснение этого первым шагом.
+
+Ответ должен содержать:
+- вывод, сказанный прямо;
+- минимум три конкурирующих версии происходящего, включая ту, в которой сам
+  рассказчик ошибается, и для каждой — дешёвую обратимую проверку;
+- рычаги, которые у человека реально есть: письменные следы, сроки, процедуры,
+  договорённости, альтернативы, союзники;
+- один рекомендуемый первый ход, а не меню;
+- точные слова, которые можно произнести, дословно;
+- чего говорить не надо;
+- что сделает другая сторона в ответ, включая худший правдоподобный исход;
+- если/то на ожидаемые ответы;
+- наблюдаемые сигналы остановиться;
+- запасной план;
+- честную оценку риска и обратимости.
+
+${SAFETY}
+
+Отвечай на языке рассказа. Обычным текстом, без JSON.`;
 }

@@ -35,6 +35,17 @@ export interface CaseInput {
   account: string;
   mode?: CaseMode;
   configurationId?: string;
+  /**
+   * Shared ledger. When a caller passes one — the benchmark always does — every
+   * call in this case reserves against the SAME budget as every other case and
+   * every judge call.
+   *
+   * An earlier version gave each case its own ledger and folded the totals into
+   * a run ledger afterwards. That enforced nothing: the fold happened after the
+   * money was spent, and the judge reserved without knowing what the case it was
+   * judging had just cost. A cap checked after the fact is a report, not a cap.
+   */
+  ledger?: CostLedger;
 }
 
 export interface EngineResult {
@@ -50,8 +61,26 @@ export const MAX_OUTPUT_TOKENS = {
   extract: 1600,
   analyse: 2000,
   strategise: 3000,
-  baseline: 1400,
+  /**
+   * Matched to the strategise ceiling, not to a short reply. The baseline is
+   * now asked for the same deliverables, so capping it lower would cut off the
+   * answer and win the comparison on budget rather than on quality.
+   */
+  baseline: 3000,
 } as const;
+
+export class StageRejectedError extends Error {
+  constructor(readonly stage: string, readonly problems: string[]) {
+    super(`Stage "${stage}" produced structurally invalid output: ${problems.join(", ")}`);
+    this.name = "StageRejectedError";
+  }
+}
+
+/** Stop the case when any validator refused. Reporting is not accepting. */
+function requireOk(stage: string, results: { ok: boolean; problems: string[] }[]): void {
+  const problems = results.filter((r) => !r.ok).flatMap((r) => r.problems);
+  if (problems.length) throw new StageRejectedError(stage, problems);
+}
 
 /** One retry, and only for unparseable JSON. Never for a refusal or a timeout. */
 const MAX_JSON_RETRIES = 1;
@@ -101,7 +130,7 @@ export async function runCase(
   }
 
   const configuration = resolveConfiguration(input.configurationId);
-  const ledger = new CostLedger(mode, MODE_CAPS[mode]);
+  const ledger = input.ledger ?? new CostLedger(mode, MODE_CAPS[mode]);
   const problems: string[] = [];
   const sentinel = randomBytes(4).toString("hex");
   const account = fence("ACCOUNT", input.account, sentinel);
@@ -121,7 +150,10 @@ export async function runCase(
   const frame = validateFrame(rawExtract.frame);
   const actors = validateActors(rawExtract.actors);
   problems.push(...frame.problems, ...actors.problems);
-  if (!frame.value || !actors.value) throw new Error("Extraction produced no usable frame.");
+  // ok, not value. Validators always return a value — that is what makes them
+  // useful for reporting — so checking the value was a check that could never
+  // fail, and put us back to "we got JSON and hoped".
+  requireOk("extract", [frame, actors]);
 
   // ---- stage 2: hypotheses and leverage, on the strong model
   const analyseSpec = modelFor(configuration, "analyse");
@@ -139,7 +171,7 @@ export async function runCase(
   const hypotheses = validateHypotheses(rawAnalyse.hypotheses);
   const leverage = validateLeverage(rawAnalyse.leverage);
   problems.push(...hypotheses.problems, ...leverage.problems);
-  if (!hypotheses.value || !leverage.value) throw new Error("Analysis produced no usable output.");
+  requireOk("analyse", [hypotheses, leverage]);
 
   // ---- stage 3: strategy, countermoves and the final plan
   const strategiseSpec = modelFor(configuration, "strategise");
@@ -163,19 +195,19 @@ export async function runCase(
   const countermoves = validateCountermoves(rawPlan.countermoves);
   const plan = validatePlan(rawPlan.plan);
   problems.push(...strategies.problems, ...countermoves.problems, ...plan.problems);
-  if (!strategies.value || !countermoves.value || !plan.value) {
-    throw new Error("Strategy stage produced no usable plan.");
-  }
+  requireOk("strategise", [strategies, countermoves, plan]);
 
   return {
+    // Non-null after requireOk: a validator that reports ok always carries a
+    // value, and requireOk has already thrown for anything that did not.
     analysis: {
-      frame: frame.value,
-      actors: actors.value,
-      hypotheses: hypotheses.value,
-      leverage: leverage.value,
-      strategies: strategies.value,
-      countermoves: countermoves.value,
-      plan: plan.value,
+      frame: frame.value!,
+      actors: actors.value!,
+      hypotheses: hypotheses.value!,
+      leverage: leverage.value!,
+      strategies: strategies.value!,
+      countermoves: countermoves.value!,
+      plan: plan.value!,
     },
     ledger,
     configuration,
@@ -194,7 +226,7 @@ export async function runBaseline(
   modelKey = "claude-sonnet-5"
 ): Promise<{ answer: string; ledger: CostLedger }> {
   const mode: CaseMode = input.mode ?? "standard";
-  const ledger = new CostLedger(mode, MODE_CAPS[mode]);
+  const ledger = input.ledger ?? new CostLedger(mode, MODE_CAPS[mode]);
   const spec = modelFor(
     { id: "baseline", description: "", roles: { extract: modelKey, analyse: modelKey, strategise: modelKey } },
     "strategise"

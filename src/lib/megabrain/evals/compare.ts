@@ -50,18 +50,46 @@ export function sideForEngine(caseId: string): Side {
 }
 
 /**
+ * Section headings and machine labels the renderer emits and free prose never
+ * would. Stripping bullets alone was not enough: an earlier version left
+ * "Конкурирующие версии:", "Рычаги:" and "[strong_negotiation]" in the text, so
+ * the judge could identify the engine by shape and reward format instead of
+ * substance — which is exactly what a blind comparison exists to prevent.
+ */
+const ENGINE_HEADINGS = [
+  "Конкурирующие версии:",
+  "Рычаги:",
+  "Точные слова:",
+  "Чего не говорить:",
+  "Если/то:",
+  "Что сделает другая сторона:",
+  "Сигналы остановиться:",
+  "Рекомендуемый ход:",
+  "Запасной план:",
+  "Что ещё неизвестно и меняет вывод:",
+];
+
+/** `[informational]`, `[strong_negotiation]` — enum values leaking into prose. */
+const KIND_LABEL = /\[(?:informational|procedural|reputational|temporal|coalition|economic|status|emotional|batna|exit|low_risk|fast|strong_negotiation|unconventional|exit_contingency)\]\s*/g;
+
+/**
  * Remove format tells. Not content — only the scaffolding that identifies the
- * producer. Bullet markers and blank-line runs are normalised; the words are
- * left exactly as written.
+ * producer. Headings become sentences, machine labels are dropped, bullets and
+ * blank-line runs are normalised; the words themselves are left as written.
  */
 export function stripFormatTells(text: string): string {
-  return text
+  let out = text.replace(KIND_LABEL, "");
+  for (const h of ENGINE_HEADINGS) out = out.split(h).join("");
+  return out
     .split("\n")
     .map((l) => l.replace(/^\s*[-*•]\s+/, "").replace(/^\s*#+\s*/, "").trimEnd())
     .filter((l, i, arr) => !(l === "" && arr[i - 1] === ""))
     .join("\n")
     .trim();
 }
+
+/** Exported so a test can assert the judge prompt carries none of them. */
+export const STRUCTURAL_TELLS = [...ENGINE_HEADINGS, "[informational]", "[strong_negotiation]"];
 
 const JUDGE_SYSTEM = `Ты оцениваешь два ответа на одну и ту же реальную трудную
 ситуацию. Не знаешь и не пытайся угадать, кто их написал.

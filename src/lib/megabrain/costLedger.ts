@@ -38,6 +38,8 @@ export interface LedgerEntry {
   outputTokens: number;
   latencyMs: number;
   estimatedCostUsd: number;
+  /** "provider" when the provider reported the charge; "table" when derived. */
+  costSource: "provider" | "table";
   /** Dollars still available to the whole request when this call was made. */
   requestBudgetUsd: number;
   /** True when the guard refused, and the call never went out. */
@@ -55,6 +57,7 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
   "outputTokens",
   "latencyMs",
   "estimatedCostUsd",
+  "costSource",
   "requestBudgetUsd",
   "stoppedByBudgetGuard",
 ];
@@ -118,6 +121,7 @@ export class CostLedger {
         outputTokens: 0,
         latencyMs: 0,
         estimatedCostUsd: projectedUsd,
+        costSource: "table",
         requestBudgetUsd: this.remainingUsd,
         stoppedByBudgetGuard: true,
       });
@@ -134,6 +138,9 @@ export class CostLedger {
     latencyMs: number;
   }): LedgerEntry {
     const { stage, spec, usage, latencyMs } = args;
+    // Provider's own figure wins. The static table is a preflight instrument,
+    // not an accounting one: it cannot see cache discounts or provider routing.
+    const fromProvider = usage.actualCostUsd !== null;
     const entry: LedgerEntry = {
       provider: spec.provider,
       model: spec.slug,
@@ -143,7 +150,10 @@ export class CostLedger {
       reasoningTokens: usage.reasoningTokens,
       outputTokens: usage.outputTokens,
       latencyMs,
-      estimatedCostUsd: costOf(spec, usage.inputTokens, usage.outputTokens),
+      estimatedCostUsd: fromProvider
+        ? usage.actualCostUsd!
+        : costOf(spec, usage.inputTokens, usage.outputTokens),
+      costSource: fromProvider ? "provider" : "table",
       requestBudgetUsd: this.remainingUsd,
       stoppedByBudgetGuard: false,
     };
@@ -157,6 +167,16 @@ export interface ProviderUsage {
   cachedTokens: number;
   reasoningTokens: number;
   outputTokens: number;
+  /**
+   * What the provider says it actually charged, when it says so.
+   *
+   * OpenRouter returns this on `usage.cost` and it is the authoritative number:
+   * it already accounts for cache discounts and provider-specific pricing,
+   * neither of which a static table can reproduce. Null when absent, never a
+   * substitute value — a fabricated charge is indistinguishable from a real one
+   * and would corrupt every cost conclusion drawn from a benchmark.
+   */
+  actualCostUsd: number | null;
 }
 
 /**
@@ -172,11 +192,18 @@ export function readUsage(raw: unknown): ProviderUsage {
   const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
   const details = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
   const outDetails = (u.completion_tokens_details ?? {}) as Record<string, unknown>;
+  // Validated, non-negative, finite. Anything else is treated as absent rather
+  // than coerced, so a malformed field cannot become a zero charge.
+  const cost =
+    typeof u.cost === "number" && Number.isFinite(u.cost) && u.cost >= 0 ? u.cost : null;
   return {
     inputTokens: n(u.prompt_tokens),
     cachedTokens: n(details.cached_tokens),
+    // Reasoning tokens are already inside completion_tokens; recorded separately
+    // for visibility, never added again.
     reasoningTokens: n(outDetails.reasoning_tokens),
     outputTokens: n(u.completion_tokens),
+    actualCostUsd: cost,
   };
 }
 

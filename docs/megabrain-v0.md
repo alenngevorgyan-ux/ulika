@@ -58,17 +58,27 @@ npx tsx scripts/megabrain-bench.ts --verify-prices
 It exits non-zero if a recorded price has drifted, because a wrong number there
 silently breaks the one control that stops a runaway bill.
 
-Projection at output ceilings (worst case, not typical):
+Two numbers, and the difference matters:
 
-| configuration | per case | vs $0.10 cap |
+| configuration | single pass | absolute ceiling |
 |---|---|---|
-| `cheap-extract-sonnet` (default) | $0.067 | OK |
-| `cheap-extract-grok` | $0.024 | OK |
-| `all-cheap` | $0.012 | OK |
+| `cheap-extract-sonnet` (default) | $0.067 | $0.134 |
+| `cheap-extract-grok` | $0.024 | $0.049 |
+| `all-cheap` | $0.012 | $0.025 |
 
-The guard **reserves against the ceiling** before each call, never against a
-hoped-for length. Reserving against typical output is how a long generation
-walks through a cap.
+**Single pass** is every stage once at its maximum output. **Absolute ceiling**
+additionally assumes every stage needed its one JSON retry — a conjunction that
+should be rare, and the number the dry run reports so nobody is surprised by it.
+
+Neither is what the runtime guard uses. It reserves each call against **actual
+accumulated spend**, so on the default configuration a Standard case has real
+retry headroom under $0.10 even though the pessimistic ceiling exceeds it. Both
+facts are asserted by tests, because the ceiling reads like a contradiction of
+the cap and is not one.
+
+The guard reserves against the OUTPUT CEILING of the call it is about to make,
+never against a hoped-for length — reserving against typical output is how a
+long generation walks through a cap.
 
 ```bash
 npx tsx scripts/megabrain-bench.ts --dry-run   # free, the default
@@ -169,3 +179,9 @@ in half of them a user whose own framing is probably wrong.
   real cost decision would be worse than using the slug.
 - **p95 cost is projected, not measured.** It becomes real after the first live
   run over all 20 cases.
+- **Structural graders count fields, not quality.** Number of hypotheses, of
+  exact-words lines, of leverage kinds and of countermoves are structural checks.
+  They are worth having and they are not evidence that a strategy is good. A win
+  driven mainly by those axes should be read as "the engine fills more fields",
+  not "the engine advises better" — the blind comparison is what speaks to
+  quality.

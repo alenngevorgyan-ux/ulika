@@ -136,13 +136,32 @@ interface FixtureOptions {
   spy?: CompletionRequest[];
   extractReturnsGarbageFirst?: boolean;
   alwaysGarbage?: boolean;
+  /** Structurally valid JSON that a validator must still refuse. */
+  tooFewHypotheses?: boolean;
+  emptyLeverage?: boolean;
+  planWithoutWords?: boolean;
+  emptyFrame?: boolean;
+  /** Force one unparseable reply from the strategy stage, to exercise a retry. */
+  strategiseGarbageFirst?: boolean;
 }
 
-const usage = (i: number, o: number) => ({ inputTokens: i, cachedTokens: 0, reasoningTokens: 0, outputTokens: o });
+/**
+ * Fixture usage includes a provider-reported cost, because that is the path the
+ * ledger actually takes in production. A fixture that omitted it would test only
+ * the static-table fallback and leave the real path unexercised.
+ */
+const usage = (i: number, o: number, costUsd: number | null = 0.002) => ({
+  inputTokens: i,
+  cachedTokens: 0,
+  reasoningTokens: 0,
+  outputTokens: o,
+  actualCostUsd: costUsd,
+});
 
 /** A transport that never touches the network. */
 export function fixtureTransport(opts: FixtureOptions): Transport {
   let extractCalls = 0;
+  let strategiseCalls = 0;
   return async (req): Promise<CompletionResult> => {
     opts.spy?.push(req);
     if (opts.alwaysGarbage) return { content: "not json", usage: usage(100, 10), latencyMs: 5 };
@@ -153,28 +172,39 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       if (opts.extractReturnsGarbageFirst && extractCalls === 1) {
         return { content: "sorry, here is prose", usage: usage(900, 20), latencyMs: 5 };
       }
+      const frame = opts.emptyFrame
+        ? { ...GOOD_ANALYSIS.frame, verifiedFacts: [], userClaims: [], interpretations: [] }
+        : GOOD_ANALYSIS.frame;
       return {
-        content: JSON.stringify({ frame: GOOD_ANALYSIS.frame, actors: GOOD_ANALYSIS.actors }),
-        usage: usage(900, 400), latencyMs: 700,
+        content: JSON.stringify({ frame, actors: GOOD_ANALYSIS.actors }),
+        usage: usage(900, 400, 0.002), latencyMs: 700,
       };
     }
     if (name === "case_analysis") {
+      const hypotheses = opts.tooFewHypotheses
+        ? { hypotheses: GOOD_ANALYSIS.hypotheses.hypotheses.slice(0, 2) }
+        : GOOD_ANALYSIS.hypotheses;
+      const leverage = opts.emptyLeverage ? { points: [] } : GOOD_ANALYSIS.leverage;
       return {
-        content: JSON.stringify({ hypotheses: GOOD_ANALYSIS.hypotheses, leverage: GOOD_ANALYSIS.leverage }),
-        usage: usage(1200, 600), latencyMs: 2200,
+        content: JSON.stringify({ hypotheses, leverage }),
+        usage: usage(1200, 600, 0.02), latencyMs: 2200,
       };
     }
     if (name === "case_plan") {
+      strategiseCalls++;
+      if (opts.strategiseGarbageFirst && strategiseCalls === 1) {
+        return { content: "прошу прощения, вот текстом", usage: usage(1800, 30), latencyMs: 900 };
+      }
       return {
         content: JSON.stringify({
           strategies: GOOD_ANALYSIS.strategies,
           countermoves: GOOD_ANALYSIS.countermoves,
-          plan: GOOD_ANALYSIS.plan,
+          plan: opts.planWithoutWords ? { ...GOOD_ANALYSIS.plan, exactWords: [] } : GOOD_ANALYSIS.plan,
         }),
-        usage: usage(1800, 1100), latencyMs: 4100,
+        usage: usage(1800, 1100, 0.03), latencyMs: 4100,
       };
     }
     // Baseline or judge: free text.
-    return { content: BANAL_BASELINE, usage: usage(700, 200), latencyMs: 1500 };
+    return { content: BANAL_BASELINE, usage: usage(700, 200, 0.01), latencyMs: 1500 };
   };
 }
