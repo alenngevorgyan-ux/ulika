@@ -375,7 +375,12 @@ describe("declared wiring status matches reality", () => {
   ].sort();
 
   /** The guard, its binding table and its test are not database tools. */
-  const GUARD_FILES = ["_env-guard.ts", "_env-guard.test.ts", "_environments.ts"].sort();
+  const GUARD_FILES = [
+    "_env-guard.ts",
+    "_env-guard.test.ts",
+    "_environments.ts",
+    "_scenario-source.test.ts",
+  ].sort();
 
   const walk = (dir: string): string[] =>
     readdirSync(join(process.cwd(), dir), { withFileTypes: true }).flatMap((e) =>

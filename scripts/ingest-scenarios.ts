@@ -10,11 +10,27 @@
  * Run: npx tsx scripts/ingest-scenarios.ts [--dry-run]
  */
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { embed } from "../src/lib/knowledge/embed";
 
 const DRY = process.argv.includes("--dry-run");
-const SOURCE_FILE = process.argv.find((a) => a.endsWith(".md")) ?? "/tmp/ulika_zip/50_scenariev.md";
+
+/**
+ * The canonical source lives IN THE REPOSITORY.
+ *
+ * It used to default to /tmp/ulika_zip/50_scenariev.md — a path /tmp clears on
+ * reboot, and which was already gone when this was noticed. The only surviving
+ * copies were a ZIP in one Downloads folder and 50 rows in the live database,
+ * so a rebuild would have reported success while dropping the fifth of the
+ * corpus that the owner actually wrote. Resolved from the repository root so it
+ * does not depend on the working directory the script is launched from.
+ *
+ * Provenance and the invariant: content/sources/ulika-50-scenarios.provenance.md
+ */
+const SOURCE_FILE =
+  process.argv.find((a) => a.endsWith(".md")) ??
+  fileURLToPath(new URL("../content/sources/ulika-50-scenarios.md", import.meta.url));
 
 const SOURCE_ID = "ulika-50-scenarios";
 const CATEGORY_ID = "applied-scenarios";
