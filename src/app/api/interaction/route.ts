@@ -59,11 +59,29 @@ export async function POST(req: NextRequest) {
 
   // Idempotent where the event type says so: ticking the same box twice must
   // leave one row with the later value, not two rows that disagree.
-  const { error } = key
+  let { error } = key
     ? await supabase
         .from("interaction_events")
         .upsert(row, { onConflict: "user_id,conversation_id,dedupe_key" })
     : await supabase.from("interaction_events").insert(row);
+
+  // ON CONFLICT cannot target a PARTIAL unique index, and an older deployment
+  // of this schema had one. Rather than being wrong until the index is fixed
+  // everywhere, fall back to update-then-insert for the dedupe case. Slower by
+  // one round trip and only on that path, and it keeps a correct index from
+  // being a deployment prerequisite.
+  if (error && key && /ON CONFLICT/i.test(error.message)) {
+    const { data: updated } = await supabase
+      .from("interaction_events")
+      .update({ payload: row.payload, case_version: row.case_version })
+      .eq("conversation_id", conversationId)
+      .eq("dedupe_key", key)
+      .select("id");
+
+    ({ error } = updated?.length
+      ? { error: null }
+      : await supabase.from("interaction_events").insert(row));
+  }
 
   if (error) {
     console.error("interaction insert:", error.message);

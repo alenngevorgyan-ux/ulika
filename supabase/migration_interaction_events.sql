@@ -46,6 +46,19 @@ create index if not exists interaction_events_lookup_idx
 
 -- Enforces the dedupe contract in the database rather than trusting the
 -- application to check first, which would race under double-submit.
+--
+-- NOT partial, deliberately. A `where dedupe_key is not null` index enforces
+-- uniqueness correctly but ON CONFLICT cannot target it — Postgres requires
+-- the statement to repeat the predicate, and PostgREST's onConflict only
+-- accepts a column list. The upsert then fails with "no unique or exclusion
+-- constraint matching the ON CONFLICT specification".
+--
+-- A plain unique index does both jobs, because Postgres treats NULLs as
+-- distinct: rows with dedupe_key null never collide, so appending events stay
+-- unlimited, while non-null keys are enforced unique.
+--
+-- (Same class of bug as an expression index with onConflict. Caught here by an
+-- acceptance test rather than in production, which is the point of the test.)
+drop index if exists public.interaction_events_dedupe_idx;
 create unique index if not exists interaction_events_dedupe_idx
-  on public.interaction_events(user_id, conversation_id, dedupe_key)
-  where dedupe_key is not null;
+  on public.interaction_events(user_id, conversation_id, dedupe_key);
