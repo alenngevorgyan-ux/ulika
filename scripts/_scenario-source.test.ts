@@ -2,7 +2,10 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { isAbsolute, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { CANONICAL_SOURCE_PATH, parse } from "./_scenario-source";
 
 /**
  * The 50 scenarios are the only part of the knowledge corpus written by the
@@ -55,15 +58,22 @@ describe("the canonical scenario source is present and whole", () => {
   });
 });
 
-describe("the canonical source carries no secrets or personal data", () => {
+/**
+ * NOT a PII scanner, and must not be described as one. It matches four fixed
+ * patterns. Text that identifies a real person by name, an address, a
+ * workplace, or a paraphrased private detail passes it untouched, because no
+ * regex finds those. What it does catch is the accidental paste — a key, a
+ * token, a contact detail — which is the realistic way this file gets polluted.
+ */
+describe("the canonical source matches none of the four secret/contact patterns scanned", () => {
   const md = readFileSync(SOURCE, "utf8");
 
   it.each([
-    ["API keys and tokens", /sk-[a-z0-9]{10,}|eyJ[A-Za-z0-9_-]{20,}|sb_secret_|AKIA[0-9A-Z]{16}/i],
+    ["API-key and token shapes", /sk-[a-z0-9]{10,}|eyJ[A-Za-z0-9_-]{20,}|sb_secret_|AKIA[0-9A-Z]{16}/i],
     ["private key blocks", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
     ["email addresses", /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/],
-    ["phone numbers", /\+?\d[\d ()-]{9,}\d/],
-  ])("contains no %s", (_label, pattern) => {
+    ["phone-number-shaped digit runs", /\+?\d[\d ()-]{9,}\d/],
+  ])("matches no %s", (_label, pattern) => {
     expect(pattern.test(md)).toBe(false);
   });
 });
@@ -80,9 +90,20 @@ describe("provenance matches the file it describes", () => {
     expect(provenance).toContain(actual);
   });
 
-  it("states what the checksum does not prove", () => {
-    // Guards against the claim being quietly upgraded into "integrity check".
-    expect(provenance()).toMatch(/does \*\*not\*\* prove integrity inside the repository/);
+  it("keeps the list of things the checksum does not establish", () => {
+    // Guards against the claim being quietly upgraded. The hash shows one thing:
+    // these bytes matched one local file at one moment. Everything below is
+    // something it cannot show, and the sidecar has to keep saying so.
+    const text = provenance();
+    for (const claim of [
+      "authorship",
+      "legal",
+      "completeness",
+      "later modification",
+      "independent",
+    ]) {
+      expect(text.toLowerCase()).toContain(claim);
+    }
   });
 
   function provenance() {
@@ -101,30 +122,61 @@ describe("the ingest script reads it from the repository", () => {
    */
   const code = script.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  it("no longer defaults to a path under /tmp", () => {
+  const moduleCode = readFileSync(join(REPO, "scripts/_scenario-source.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  it("no longer defaults to a path under /tmp, in either file", () => {
     expect(code).not.toContain("/tmp/ulika_zip");
+    expect(moduleCode).not.toContain("/tmp/ulika_zip");
   });
 
-  it("defaults to the committed canonical file", () => {
-    expect(code).toContain("../content/sources/ulika-50-scenarios.md");
+  it("takes its default from the shared module rather than its own copy", () => {
+    // Wiring, not path resolution — the resolution itself is checked
+    // behaviourally below. What this catches is the script quietly growing a
+    // second definition that drifts from the one the tests exercise.
+    expect(code).toContain("CANONICAL_SOURCE_PATH");
+    expect(code).toMatch(/from "\.\/_scenario-source"/);
   });
 
-  it("resolves that path independently of the working directory", () => {
-    // A bare relative string would break the moment the script is launched from
-    // anywhere but the repo root.
-    expect(code).toMatch(/fileURLToPath\(\s*new URL\(/);
+  it("parses exactly 50 techniques through the parser the script itself uses", () => {
+    // The same module ingest-scenarios.ts imports, so this cannot drift from
+    // what the tool actually does. Previously this spawned `npx tsx` and read
+    // stdout, which put a package runner inside the test runner and made the
+    // shell part of what was being tested.
+    const techniques = parse(readFileSync(CANONICAL_SOURCE_PATH, "utf8"));
+    expect(techniques).toHaveLength(EXPECTED_TECHNIQUES);
+    expect(new Set(techniques.map((t) => t.section)).size).toBe(EXPECTED_SECTIONS);
+  });
+});
+
+describe("the source path does not depend on the working directory", () => {
+  it("is absolute", () => {
+    expect(isAbsolute(CANONICAL_SOURCE_PATH)).toBe(true);
   });
 
-  it("parses exactly 50 techniques through the real --dry-run path", () => {
-    // The acceptance criterion for this step, run literally rather than
-    // approximated: the actual script, its actual default path, its actual
-    // parser. --dry-run returns before any database or embedding call, so this
-    // touches nothing.
-    const out = execFileSync("npx", ["tsx", "scripts/ingest-scenarios.ts", "--dry-run"], {
-      cwd: REPO,
-      encoding: "utf8",
-      timeout: 120_000,
-    });
-    expect(out).toContain(`parsed ${EXPECTED_TECHNIQUES} techniques across ${EXPECTED_SECTIONS} sections`);
-  }, 120_000);
+  it("resolves relative to the module, proven from this test's own location", () => {
+    // Computed independently here from import.meta.url. If the script had used
+    // process.cwd() or a bare relative string, these two would not agree.
+    const fromThisFile = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../content/sources/ulika-50-scenarios.md"
+    );
+    expect(CANONICAL_SOURCE_PATH).toBe(fromThisFile);
+  });
+
+  it("still reads after the process changes directory", () => {
+    // The real behavioural check, and not a string search of the source: move
+    // the process somewhere else entirely and read through the same constant.
+    const before = process.cwd();
+    try {
+      process.chdir(tmpdir());
+      expect(process.cwd()).not.toBe(before);
+      expect(parse(readFileSync(CANONICAL_SOURCE_PATH, "utf8"))).toHaveLength(
+        EXPECTED_TECHNIQUES
+      );
+    } finally {
+      process.chdir(before);
+    }
+  });
 });

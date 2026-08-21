@@ -379,6 +379,7 @@ describe("declared wiring status matches reality", () => {
     "_env-guard.ts",
     "_env-guard.test.ts",
     "_environments.ts",
+    "_scenario-source.ts",
     "_scenario-source.test.ts",
   ].sort();
 

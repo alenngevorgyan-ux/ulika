@@ -10,9 +10,9 @@
  * Run: npx tsx scripts/ingest-scenarios.ts [--dry-run]
  */
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { embed } from "../src/lib/knowledge/embed";
+import { CANONICAL_SOURCE_PATH, parse } from "./_scenario-source";
 
 const DRY = process.argv.includes("--dry-run");
 
@@ -28,9 +28,7 @@ const DRY = process.argv.includes("--dry-run");
  *
  * Provenance and the invariant: content/sources/ulika-50-scenarios.provenance.md
  */
-const SOURCE_FILE =
-  process.argv.find((a) => a.endsWith(".md")) ??
-  fileURLToPath(new URL("../content/sources/ulika-50-scenarios.md", import.meta.url));
+const SOURCE_FILE = process.argv.find((a) => a.endsWith(".md")) ?? CANONICAL_SOURCE_PATH;
 
 const SOURCE_ID = "ulika-50-scenarios";
 const CATEGORY_ID = "applied-scenarios";
@@ -119,51 +117,6 @@ const TECHNIQUE_META: Record<number, { grade: Grade; tags: string[] }> = {
 /** Block B is stage craft and must never be presented as perception. */
 const COLD_READING_RANGE = { from: 11, to: 20 };
 
-interface Technique {
-  n: number;
-  title: string;
-  section: string;
-  mechanism: string;
-  scenario: string;
-}
-
-function parse(md: string): Technique[] {
-  const out: Technique[] = [];
-  let section = "";
-  let cur: Technique | null = null;
-  const body: string[] = [];
-
-  const flush = () => {
-    if (!cur) return;
-    const text = body.join("\n").trim();
-    // The mechanism is the italic line directly under the heading; everything
-    // after it is the scenario.
-    const m = text.match(/^\*([\s\S]+?)\*\s*/);
-    cur.mechanism = m ? m[1].replace(/^Механизм:\s*/i, "").trim() : "";
-    cur.scenario = (m ? text.slice(m[0].length) : text).trim();
-    out.push(cur);
-    body.length = 0;
-  };
-
-  for (const line of md.split("\n")) {
-    if (line.startsWith("## ")) {
-      flush();
-      cur = null;
-      section = line.slice(3).trim();
-    } else if (line.startsWith("### ")) {
-      flush();
-      const h = line.slice(4).trim();
-      const m = h.match(/^(\d+)\.\s*(.+)$/);
-      cur = m
-        ? { n: Number(m[1]), title: m[2].trim(), section, mechanism: "", scenario: "" }
-        : null;
-    } else if (cur) {
-      body.push(line);
-    }
-  }
-  flush();
-  return out;
-}
 
 async function main() {
   const md = readFileSync(SOURCE_FILE, "utf8");
