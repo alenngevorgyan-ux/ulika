@@ -1,4 +1,4 @@
-import { LEVERAGE_KINDS, REDIRECT_CATEGORIES, STRATEGY_KINDS } from "./schemas";
+import { LEVERAGE_KINDS, PHRASE_ROLES, REDIRECT_CATEGORIES, STRATEGY_KINDS } from "./schemas";
 
 /**
  * JSON Schemas sent as `response_format`, so the provider constrains generation
@@ -27,8 +27,21 @@ export const EXTRACT_SCHEMA = {
   name: "case_extraction",
   schema: obj({
     frame: obj({
-      documentedFacts: strings("Backed by an artefact the user has. Often legitimately empty."),
-      reportedFacts: strings("Stated by the user. Testimony, not evidence."),
+      documentedFacts: strings("MUST BE EMPTY in V0 — nothing here can inspect a document."),
+      reportedFacts: {
+        type: "array",
+        description: "Stated by the user. Testimony, not evidence. Ids are referenced by actor claims.",
+        items: obj({ id: { type: "string" }, text: { type: "string" } }),
+      },
+      reportedEvidenceAvailable: {
+        type: "array",
+        description: "What the user SAYS they can produce. Never treated as produced.",
+        items: obj({
+          type: { type: "string" },
+          description: { type: "string" },
+          verificationStatus: { type: "string", enum: ["not_reviewed"] },
+        }),
+      },
       interpretations: strings("Readings already layered on by the user."),
       unknowns: strings("Gaps that would change the strategy if filled."),
       constraints: strings("Money, time, legal, relational limits."),
@@ -39,12 +52,72 @@ export const EXTRACT_SCHEMA = {
         type: "array",
         items: obj({
           label: { type: "string" },
-          goals: strings(""),
-          fears: strings(""),
-          resources: strings(""),
-          authority: { type: "string" },
-          dependencies: strings("What this actor needs from others."),
-          likelyReactions: strings(""),
+          goals: { type: "array", items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value", "basis", "supportingFactIds"],
+          properties: {
+            value: { type: "string", description: "Literally \"unknown\" when basis is unknown." },
+            basis: { type: "string", enum: ["reported", "inferred", "unknown"] },
+            supportingFactIds: { type: "array", items: { type: "string" } },
+            uncertainty: { type: "string", description: "Required when basis is inferred." },
+          },
+        } },
+          fears: { type: "array", items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value", "basis", "supportingFactIds"],
+          properties: {
+            value: { type: "string", description: "Literally \"unknown\" when basis is unknown." },
+            basis: { type: "string", enum: ["reported", "inferred", "unknown"] },
+            supportingFactIds: { type: "array", items: { type: "string" } },
+            uncertainty: { type: "string", description: "Required when basis is inferred." },
+          },
+        } },
+          resources: { type: "array", items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value", "basis", "supportingFactIds"],
+          properties: {
+            value: { type: "string", description: "Literally \"unknown\" when basis is unknown." },
+            basis: { type: "string", enum: ["reported", "inferred", "unknown"] },
+            supportingFactIds: { type: "array", items: { type: "string" } },
+            uncertainty: { type: "string", description: "Required when basis is inferred." },
+          },
+        } },
+          authority: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value", "basis", "supportingFactIds"],
+          properties: {
+            value: { type: "string", description: "Literally \"unknown\" when basis is unknown." },
+            basis: { type: "string", enum: ["reported", "inferred", "unknown"] },
+            supportingFactIds: { type: "array", items: { type: "string" } },
+            uncertainty: { type: "string", description: "Required when basis is inferred." },
+          },
+        },
+          dependencies: { type: "array", items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value", "basis", "supportingFactIds"],
+          properties: {
+            value: { type: "string", description: "Literally \"unknown\" when basis is unknown." },
+            basis: { type: "string", enum: ["reported", "inferred", "unknown"] },
+            supportingFactIds: { type: "array", items: { type: "string" } },
+            uncertainty: { type: "string", description: "Required when basis is inferred." },
+          },
+        } },
+          likelyReactions: { type: "array", items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value", "basis", "supportingFactIds"],
+          properties: {
+            value: { type: "string", description: "Literally \"unknown\" when basis is unknown." },
+            basis: { type: "string", enum: ["reported", "inferred", "unknown"] },
+            supportingFactIds: { type: "array", items: { type: "string" } },
+            uncertainty: { type: "string", description: "Required when basis is inferred." },
+          },
+        } },
         }),
       },
     }),
@@ -73,10 +146,18 @@ export const ANALYSE_SCHEMA = {
     leverage: obj({
       points: {
         type: "array",
+        minItems: 10,
+        description: "All ten kinds, every time. Absent is a status, not an omission.",
         items: obj({
           kind: { type: "string", enum: [...LEVERAGE_KINDS] },
+          status: { type: "string", enum: ["present", "absent", "unknown"] },
           description: { type: "string" },
-          availableToUser: { type: "boolean" },
+          basis: { type: "string" },
+          risk: { type: "string" },
+          reversibility: {
+            type: "string",
+            enum: ["reversible", "hard_to_reverse", "irreversible", "not_applicable"],
+          },
         }),
       },
     }),
@@ -97,10 +178,10 @@ export const STRATEGISE_SCHEMA = {
           reversible: { type: "boolean" },
           costIfItFails: { type: "string" },
           redirect: {
-            type: "object",
+            type: ["object", "null"],
             additionalProperties: false,
             description:
-              "Set when a dangerous idea was converted. Categories only — never restate the dangerous plan.",
+              "NULL unless a dangerous idea was actually converted. Never a placeholder.",
             required: ["category", "reason", "preservedObjective"],
             properties: {
               category: { type: "string", enum: [...REDIRECT_CATEGORIES] },
@@ -129,11 +210,29 @@ export const STRATEGISE_SCHEMA = {
       conclusion: { type: "string" },
       missingInformation: strings(""),
       recommendedMove: { type: "string" },
-      exactWords: strings("Verbatim sentences the user can say."),
-      whatNotToSay: strings(""),
-      branches: {
+      exactWords: {
         type: "array",
-        items: obj({ condition: { type: "string" }, then: { type: "string" } }),
+        minItems: 3,
+        description: "At least three, one per role. Said out loud by the user.",
+        items: obj({
+          role: { type: "string", enum: [...PHRASE_ROLES] },
+          purpose: { type: "string" },
+          text: { type: "string" },
+          useWhen: { type: "string" },
+          doNotUseWhen: { type: "string" },
+        }),
+      },
+      whatNotToSay: strings(""),
+      ifThenBranches: {
+        type: "array",
+        minItems: 3,
+        description: "Conceded, stalled, escalated — the three things the other side does.",
+        items: obj({
+          if: { type: "string" },
+          then: { type: "string" },
+          rationale: { type: "string" },
+          stopCondition: { type: "string", description: "Observable, not a feeling." },
+        }),
       },
       stopSignals: strings("Observable events, not feelings."),
       fallbackPlan: { type: "string" },
@@ -169,4 +268,16 @@ export const COMBINED_SCHEMA = {
       ...STRATEGISE_SCHEMA.schema.properties,
     },
   },
+} as const;
+
+/** Light mode. Five fields, all required, nothing optional to pad with. */
+export const LIGHT_SCHEMA = {
+  name: "light_plan",
+  schema: obj({
+    shortAssessment: { type: "string" },
+    nextMove: { type: "string" },
+    oneExactPhrase: { type: "string" },
+    oneRisk: { type: "string" },
+    oneQuestion: { type: "string" },
+  }),
 } as const;

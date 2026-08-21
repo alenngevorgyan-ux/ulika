@@ -42,7 +42,7 @@ describe("validators refuse degraded model output", () => {
   });
   it("rejects a plan with no verbatim words — the part users judge", () => {
     expect(validatePlan({ conclusion: "c", recommendedMove: "m", risk: "green", uncertainty: "u" }).problems)
-      .toContain("plan.exactWords");
+      .toContain("plan.exactWords.tooFew");
   });
   it("drops malformed strategies instead of inventing fields", () => {
     const r = validateStrategies({ strategies: [{ kind: "nope", summary: "s" }, ...GOOD_ANALYSIS.strategies.strategies] });
@@ -50,7 +50,7 @@ describe("validators refuse degraded model output", () => {
   });
   it("accepts the known-good fixture across every validator", () => {
     expect(validateFrame(GOOD_ANALYSIS.frame).ok).toBe(true);
-    expect(validateActors(GOOD_ANALYSIS.actors).ok).toBe(true);
+    expect(validateActors(GOOD_ANALYSIS.actors, GOOD_ANALYSIS.frame).ok).toBe(true);
     expect(validateHypotheses(GOOD_ANALYSIS.hypotheses).ok).toBe(true);
     expect(validateLeverage(GOOD_ANALYSIS.leverage).ok).toBe(true);
     expect(validateStrategies(GOOD_ANALYSIS.strategies).ok).toBe(true);
@@ -527,7 +527,7 @@ describe("anti-banality is structural, not a word list", () => {
   });
   it("reports which signals it found, so the number is never bare", () => {
     expect(gradeAnswer(c, GOOD_RENDER, GOOD_ANALYSIS).quality.find((q) => q.axis === "anti_banality")!.note)
-      .toMatch(/\d\/7 signals/);
+      .toMatch(/\d\/8 structural signals/);
   });
 });
 
@@ -596,9 +596,13 @@ describe("a stage that validates as not-ok stops the case", () => {
     await expect(runCase({ account: "x" }, fixtureTransport({ tooFewHypotheses: true })))
       .rejects.toThrow(StageRejectedError);
   });
-  it("rejects an empty leverage map", async () => {
+  it("rejects a leverage map that skips kinds", async () => {
+    // "Missing" now names which kinds, because a skipped kind and an absent
+    // one are different claims and the message should say which happened.
     await expect(runCase({ account: "x" }, fixtureTransport({ emptyLeverage: true })))
-      .rejects.toThrow(/leverage.empty/);
+      .rejects.toThrow(/leverage\.missing/);
+    await expect(runCase({ account: "x" }, fixtureTransport({ partialLeverage: true })))
+      .rejects.toThrow(/leverage\.missing:emotional,batna,exit/);
   });
   it("rejects a plan with no verbatim words", async () => {
     await expect(runCase({ account: "x" }, fixtureTransport({ planWithoutWords: true })))
@@ -865,7 +869,7 @@ describe("blind comparison cannot be gamed by position or format", () => {
 
   it("keeps the substance after stripping", () => {
     const cleaned = stripFormatTells(renderAnalysis(GOOD_ANALYSIS));
-    expect(cleaned).toContain(GOOD_ANALYSIS.plan.exactWords[0]);
+    expect(cleaned).toContain(GOOD_ANALYSIS.plan.exactWords[0].text);
     expect(cleaned).toContain(GOOD_ANALYSIS.hypotheses.hypotheses[0].claim);
   });
   it("counts a tie as half a win, so hedging cannot inflate the rate", () => {

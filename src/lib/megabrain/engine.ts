@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { CostLedger, MODE_CAPS, type CaseMode } from "./costLedger";
+import { BudgetExceededError, CostLedger, MODE_CAPS, type CaseMode } from "./costLedger";
 import { modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
-import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA } from "./jsonSchemas";
-import { analysePrompt, baselinePrompt, combinedPrompt, extractPrompt, fence, strategisePrompt } from "./prompts";
+import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
+import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
 import { parseJsonReply, type Transport } from "./transport";
+import { checkLanguage, resolveLanguage } from "./language";
+import { capFor, ModeNotAvailable, MODES, type AnalysisMode } from "./analysisMode";
 import {
   validateActors,
   validateCountermoves,
@@ -12,7 +14,11 @@ import {
   validateLeverage,
   validatePlan,
   validateStrategies,
+  validateLightPlan,
   type CaseAnalysis,
+  type LightPlan,
+  type Jurisdiction,
+  type ResponseLanguage,
 } from "./schemas";
 
 /**
@@ -35,6 +41,12 @@ export interface CaseInput {
   account: string;
   mode?: CaseMode;
   configurationId?: string;
+  /** Explicit wins; "auto" reads the account. Never the interface language. */
+  responseLanguage?: ResponseLanguage;
+  /** Independent of language. Unknown is the honest default and the common one. */
+  jurisdiction?: Jurisdiction;
+  /** How much analysis to buy. See analysisMode.ts. */
+  analysisMode?: AnalysisMode;
   /**
    * Shared ledger. When a caller passes one — the benchmark always does — every
    * call in this case reserves against the SAME budget as every other case and
@@ -67,6 +79,10 @@ export const MAX_OUTPUT_TOKENS = {
    * answer and win the comparison on budget rather than on quality.
    */
   baseline: 3000,
+  /** One short answer. Light is not a compressed case file. */
+  light: 700,
+  /** The critic returns a whole revised plan, so it needs the same room. */
+  critic: 3000,
 } as const;
 
 export class StageRejectedError extends Error {
@@ -156,6 +172,56 @@ async function stage(
   throw new Error(`Stage "${name}" returned no parseable JSON after ${MAX_JSON_RETRIES + 1} attempts.`);
 }
 
+/**
+ * Light mode: one call, one next move, its own $0.02 ceiling.
+ *
+ * Separate function rather than a branch inside runCase, so "Light must never
+ * make more than one model call" is a property of the code shape rather than a
+ * condition somebody has to keep true.
+ */
+export async function runLight(
+  input: CaseInput,
+  transport: Transport
+): Promise<{ plan: LightPlan; ledger: CostLedger }> {
+  const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
+  const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
+  const cap = capFor("light", input.ledger ? undefined : undefined);
+  const ledger = input.ledger ? input.ledger.envelope(cap) : new CostLedger("quick", cap);
+  const cfg = resolveConfiguration(input.configurationId);
+  const spec = modelFor(cfg, "strategise");
+  const sentinel = randomBytes(4).toString("hex");
+  const attemptId = randomBytes(6).toString("hex");
+  const user = fence("ACCOUNT", input.account, sentinel);
+  const system = lightPrompt(sentinel, language, jurisdiction);
+
+  const { projectedUsd } = ledger.reserve("light", spec, system + user, MAX_OUTPUT_TOKENS.light, {
+    attemptId,
+    retryNumber: 0,
+  });
+  const result = await transport({
+    modelSlug: spec.slug,
+    system,
+    user,
+    maxOutputTokens: MAX_OUTPUT_TOKENS.light,
+    jsonSchema: LIGHT_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
+    temperature: 0.6,
+    maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+  });
+  ledger.record({
+    stage: "light", spec, usage: result.usage, latencyMs: result.latencyMs,
+    telemetry: result.telemetry, attemptId, retryNumber: 0, reservedUsd: projectedUsd,
+  });
+
+  // No retry here, deliberately: a second call would double the cost of the
+  // cheapest mode, and Light exists precisely to be cheap and fast.
+  const parsed = parseJsonReply(result.content);
+  ledger.onValidation?.({ attemptId, stage: "light", result: parsed !== null ? "ok" : "unparseable" });
+  if (parsed === null) throw new StageRejectedError("light", ["light.unparseable"]);
+  const v = validateLightPlan(parsed);
+  if (!v.ok) throw new StageRejectedError("light", v.problems);
+  return { plan: { ...v.value!, language, jurisdiction }, ledger };
+}
+
 export async function runCase(
   input: CaseInput,
   transport: Transport
@@ -179,6 +245,8 @@ export async function runCase(
   const problems: string[] = [];
   const sentinel = randomBytes(4).toString("hex");
   const account = fence("ACCOUNT", input.account, sentinel);
+  const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
+  const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
 
   // ---- stage 1: extraction, on the cheap model
   const extractSpec = modelFor(configuration, "extract");
@@ -187,13 +255,13 @@ export async function runCase(
     ledger,
     "extract",
     extractSpec,
-    extractPrompt(sentinel),
+    extractPrompt(sentinel, language, jurisdiction),
     account,
     EXTRACT_SCHEMA
   )) as Record<string, unknown>;
 
   const frame = validateFrame(rawExtract.frame);
-  const actors = validateActors(rawExtract.actors);
+  const actors = validateActors(rawExtract.actors, frame.value);
   problems.push(...frame.problems, ...actors.problems);
   // ok, not value. Validators always return a value — that is what makes them
   // useful for reporting — so checking the value was a check that could never
@@ -211,7 +279,7 @@ export async function runCase(
       ledger,
       "strategise",
       spec,
-      combinedPrompt(sentinel),
+      combinedPrompt(sentinel, language, jurisdiction),
       JSON.stringify({ frame: frame.value, actors: actors.value }),
       COMBINED_SCHEMA as unknown as { name: string; schema: Record<string, unknown> }
     )) as Record<string, unknown>;
@@ -227,6 +295,7 @@ export async function runCase(
       analysis: {
         frame: frame.value!, actors: actors.value!, hypotheses: h.value!, leverage: l.value!,
         strategies: st.value!, countermoves: cm.value!, plan: pl.value!,
+        language, jurisdiction,
       },
       ledger,
       configuration,
@@ -242,7 +311,7 @@ export async function runCase(
     ledger,
     "analyse",
     analyseSpec,
-    analysePrompt(sentinel),
+    analysePrompt(sentinel, language, jurisdiction),
     analyseInput,
     ANALYSE_SCHEMA
   )) as Record<string, unknown>;
@@ -266,7 +335,7 @@ export async function runCase(
     ledger,
     "strategise",
     strategiseSpec,
-    strategisePrompt(sentinel),
+    strategisePrompt(sentinel, language, jurisdiction),
     strategiseInput,
     STRATEGISE_SCHEMA
   )) as Record<string, unknown>;
@@ -277,6 +346,19 @@ export async function runCase(
   problems.push(...strategies.problems, ...countermoves.problems, ...plan.problems);
   reportValidation(ledger, "strategise", [strategies, countermoves, plan]);
   requireOk("strategise", [strategies, countermoves, plan]);
+
+  // The answer must be in the language the user reads. A plan whose exactWords
+  // are in the wrong language is not a degraded plan, it is an unusable one.
+  const langCheck = checkLanguage(
+    {
+      frame: frame.value!, actors: actors.value!, hypotheses: hypotheses.value!,
+      leverage: leverage.value!, strategies: strategies.value!,
+      countermoves: countermoves.value!, plan: plan.value!, language, jurisdiction,
+    },
+    language
+  );
+  problems.push(...langCheck.problems);
+  if (!langCheck.ok) throw new StageRejectedError("language", langCheck.problems);
 
   return {
     // Non-null after requireOk: a validator that reports ok always carries a
@@ -289,6 +371,8 @@ export async function runCase(
       strategies: strategies.value!,
       countermoves: countermoves.value!,
       plan: plan.value!,
+      language,
+      jurisdiction,
     },
     ledger,
     configuration,
@@ -320,7 +404,10 @@ export async function runBaseline(
     },
     "strategise"
   );
-  const system = baselinePrompt();
+  const system = baselinePrompt(
+    resolveLanguage(input.responseLanguage ?? "auto", input.account),
+    input.jurisdiction ?? { country: "unknown" }
+  );
 
   const attemptId = randomBytes(6).toString("hex");
   const { projectedUsd } = ledger.reserve(
@@ -347,39 +434,151 @@ export async function runBaseline(
   return { answer: result.content, ledger };
 }
 
+/**
+ * Strong: Standard, then ONE bounded revision pass.
+ *
+ * The critic sees the finished plan, the facts and the constraints — never the
+ * raw account and never the earlier reasoning. It returns a revised plan rather
+ * than a review, and the user is never shown a second voice: two personas
+ * arguing reads as theatre by the third message and halves the information
+ * density of every answer.
+ *
+ * Exactly one pass. Not a loop, not "until it stops improving" — that is how a
+ * bounded cost becomes an unbounded one.
+ */
+export async function runStrong(
+  input: CaseInput,
+  transport: Transport
+): Promise<EngineResult> {
+  const cap = capFor("strong");
+  const ledger = input.ledger ? input.ledger.envelope(cap) : new CostLedger("standard", cap);
+  const base = await runCase({ ...input, ledger }, transport);
+
+  const configuration = base.configuration;
+  const spec = modelFor(configuration, "strategise");
+  const sentinel = randomBytes(4).toString("hex");
+  const attemptId = randomBytes(6).toString("hex");
+  const system = criticPrompt(sentinel, base.analysis.language, base.analysis.jurisdiction);
+  // Compact input on purpose: the plan, the facts, the constraints. Sending the
+  // account again would re-open every door the extraction stage closed.
+  const user = JSON.stringify({
+    plan: base.analysis.plan,
+    strategies: base.analysis.strategies,
+    countermoves: base.analysis.countermoves,
+    facts: base.analysis.frame.reportedFacts,
+    unknowns: base.analysis.frame.unknowns,
+    constraints: base.analysis.frame.constraints,
+  });
+
+  let revised = base.analysis.plan;
+  const problems = [...base.problems];
+  try {
+    const { projectedUsd } = ledger.reserve("critic", spec, system + user, MAX_OUTPUT_TOKENS.critic, {
+      attemptId,
+      retryNumber: 0,
+    });
+    const result = await transport({
+      modelSlug: spec.slug,
+      system,
+      user,
+      maxOutputTokens: MAX_OUTPUT_TOKENS.critic,
+      jsonSchema: STRATEGISE_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
+      temperature: 0.4,
+      maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+    });
+    ledger.record({
+      stage: "critic", spec, usage: result.usage, latencyMs: result.latencyMs,
+      telemetry: result.telemetry, attemptId, retryNumber: 0, reservedUsd: projectedUsd,
+    });
+    const parsed = parseJsonReply(result.content) as Record<string, unknown> | null;
+    const check = parsed ? validatePlan(parsed.plan ?? parsed) : { ok: false, problems: ["critic.unparseable"], value: undefined };
+    ledger.onValidation?.({ attemptId, stage: "critic", result: check.ok ? "ok" : "invalid" });
+    if (check.ok && check.value) {
+      revised = check.value;
+    } else {
+      // A failed revision is not a failed case. The Standard plan was already
+      // valid; keeping it is strictly better than discarding it.
+      problems.push(...check.problems.map((p) => `critic.rejected:${p}`));
+    }
+  } catch (e) {
+    if (e instanceof BudgetExceededError) {
+      problems.push("critic.skipped:budget");
+    } else {
+      throw e;
+    }
+  }
+
+  return { ...base, analysis: { ...base.analysis, plan: revised }, ledger, problems };
+}
+
+/**
+ * Dispatch by product mode.
+ *
+ * Deep throws rather than running Standard. Reporting a Standard result as Deep
+ * would be a lie about what the user paid for, and a silent fallback is the
+ * kind that nobody notices until it matters.
+ */
+export async function runAnalysis(
+  input: CaseInput & { analysisMode: AnalysisMode },
+  transport: Transport
+): Promise<{ mode: AnalysisMode; light?: LightPlan; full?: EngineResult; ledger: CostLedger }> {
+  const mode = input.analysisMode;
+  if (!MODES[mode].available) throw new ModeNotAvailable(mode);
+
+  if (mode === "light") {
+    const { plan, ledger } = await runLight(input, transport);
+    return { mode, light: plan, ledger };
+  }
+  if (mode === "strong") {
+    const full = await runStrong(input, transport);
+    return { mode, full, ledger: full.ledger };
+  }
+  const full = await runCase({ ...input, ledger: input.ledger }, transport);
+  return { mode, full, ledger: full.ledger };
+}
+
 /** Render an analysis as the prose a reader would judge, for blind comparison. */
 export function renderAnalysis(a: CaseAnalysis): string {
-  const lines: string[] = [];
-  lines.push(a.plan.conclusion, "");
+  const ru = a.language === "ru";
+  const L = {
+    unknown: ru ? "Что ещё неизвестно и меняет вывод:" : "What is still unknown and would change this:",
+    versions: ru ? "Конкурирующие версии:" : "Competing readings:",
+    check: ru ? "Как проверить" : "How to test",
+    leverage: ru ? "Рычаги:" : "Leverage:",
+    move: ru ? "Рекомендуемый ход:" : "Recommended move:",
+    words: ru ? "Точные слова:" : "Exact words:",
+    dont: ru ? "Чего не говорить:" : "What not to say:",
+    branches: ru ? "Если/то:" : "If/then:",
+    counter: ru ? "Что сделает другая сторона:" : "What the other side does:",
+    stop: ru ? "Сигналы остановиться:" : "Stop signals:",
+    fallback: ru ? "Запасной план:" : "Fallback:",
+    risk: ru ? "Риск" : "Risk",
+    uncertainty: ru ? "Неопределённость" : "Uncertainty",
+  };
+  const lines: string[] = [a.plan.conclusion, ""];
   if (a.plan.missingInformation.length) {
-    lines.push("Что ещё неизвестно и меняет вывод:");
-    lines.push(...a.plan.missingInformation.map((m) => `- ${m}`), "");
+    lines.push(L.unknown, ...a.plan.missingInformation.map((m) => `- ${m}`), "");
   }
-  lines.push("Конкурирующие версии:");
+  lines.push(L.versions);
   for (const h of a.hypotheses.hypotheses) {
-    lines.push(`- ${h.claim} (${h.confidence}%). Как проверить: ${h.discriminatingTest}`);
+    lines.push(`- ${h.claim} (${h.confidence}%). ${L.check}: ${h.discriminatingTest}`);
   }
-  lines.push("", "Рычаги:");
-  for (const p of a.leverage.points.filter((x) => x.availableToUser)) {
+  lines.push("", L.leverage);
+  for (const p of a.leverage.points.filter((x) => x.status === "present")) {
     lines.push(`- [${p.kind}] ${p.description}`);
   }
-  lines.push("", `Рекомендуемый ход: ${a.plan.recommendedMove}`, "");
-  lines.push("Точные слова:");
-  lines.push(...a.plan.exactWords.map((w) => `- «${w}»`));
-  if (a.plan.whatNotToSay.length) {
-    lines.push("", "Чего не говорить:", ...a.plan.whatNotToSay.map((w) => `- ${w}`));
+  lines.push("", `${L.move} ${a.plan.recommendedMove}`, "", L.words);
+  for (const p of a.plan.exactWords) lines.push(`- (${p.role}) «${p.text}»`);
+  if (a.plan.whatNotToSay.length) lines.push("", L.dont, ...a.plan.whatNotToSay.map((w) => `- ${w}`));
+  if (a.plan.ifThenBranches.length) {
+    lines.push("", L.branches, ...a.plan.ifThenBranches.map((b) => `- ${b.if} → ${b.then}`));
   }
-  if (a.plan.branches.length) {
-    lines.push("", "Если/то:", ...a.plan.branches.map((b) => `- Если ${b.condition} → ${b.then}`));
-  }
-  lines.push("", "Что сделает другая сторона:");
+  lines.push("", L.counter);
   for (const c of a.countermoves.countermoves) {
-    lines.push(`- [${c.againstStrategy}] ${c.likelyResponse} Худший исход: ${c.worstPlausibleOutcome}`);
+    lines.push(`- [${c.againstStrategy}] ${c.likelyResponse} ${c.worstPlausibleOutcome}`);
   }
-  if (a.plan.stopSignals.length) {
-    lines.push("", "Сигналы остановиться:", ...a.plan.stopSignals.map((s) => `- ${s}`));
-  }
-  lines.push("", `Запасной план: ${a.plan.fallbackPlan}`);
-  lines.push(`Риск: ${a.plan.risk}. Неопределённость: ${a.plan.uncertainty}`);
+  if (a.plan.stopSignals.length) lines.push("", L.stop, ...a.plan.stopSignals.map((x) => `- ${x}`));
+  lines.push("", `${L.fallback} ${a.plan.fallbackPlan}`);
+  lines.push(`${L.risk}: ${a.plan.risk}. ${L.uncertainty}: ${a.plan.uncertainty}`);
   return lines.join("\n");
 }

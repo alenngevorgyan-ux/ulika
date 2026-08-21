@@ -18,20 +18,84 @@
 /** Where a statement came from. The whole product rests on not blurring these. */
 export type Provenance = "documented" | "reported" | "interpreted";
 
+/**
+ * The language of the ANSWER. Three separate things that kept collapsing into
+ * one: interface language, answer language and jurisdiction.
+ *
+ * The first live run answered a Russian account in English, which makes the
+ * exactWords — the part a user actually says out loud — unusable. "auto" reads
+ * the account itself; an explicit value always wins.
+ */
+export type ResponseLanguage = "auto" | "ru" | "en";
+export type ResolvedLanguage = "ru" | "en";
+
+/**
+ * Jurisdiction, deliberately NOT derived from language.
+ *
+ * A Russian-speaking user may be in Armenia; an English-speaking one may be
+ * anywhere. Inferring law from language is how a tool ends up stating a legal
+ * position for the wrong country with complete confidence.
+ */
+export interface Jurisdiction {
+  country: "unknown" | "AM" | "US" | "RU" | "other";
+  region?: string;
+}
+
+/** A fact carries an id so a downstream claim can point at it. */
+export interface Fact {
+  id: string;
+  text: string;
+}
+
+/**
+ * Something the user SAYS they have. Not something we have seen.
+ *
+ * V0 has no document ingestion, so "I have the commit history" is testimony
+ * about evidence, not evidence. It used to land in documentedFacts, which
+ * asserted a verification nobody performed.
+ */
+export interface ReportedEvidence {
+  type: string;
+  description: string;
+  /** The only permitted value in V0. There is no path to any other. */
+  verificationStatus: "not_reviewed";
+}
+
+/** How a claim about an actor is grounded. */
+export type ClaimBasis = "reported" | "inferred" | "unknown";
+
+/**
+ * One claim about an actor, with its provenance attached.
+ *
+ * The first run gave a director — mentioned once, in passing, as the intended
+ * recipient of an email — a full psychology including a fear of "losing
+ * technical talent". Nothing in the account supported any of it. A claim now
+ * either points at facts, admits it is inferred and says how uncertain, or says
+ * unknown; it may not quietly be none of the three.
+ */
+export interface ActorClaim {
+  /** "unknown" when basis is unknown. Never invented detail in that case. */
+  value: string;
+  basis: ClaimBasis;
+  /** Ids from CaseFrame.reportedFacts. Required when basis is "reported". */
+  supportingFactIds: string[];
+  /** Required when basis is "inferred". */
+  uncertainty?: string;
+}
+
 export interface CaseFrame {
   /**
-   * Backed by an artefact the user actually has: a contract clause, a dated
-   * message, a commit, a written policy.
+   * ALWAYS EMPTY IN V0, and enforced empty by the validator.
    *
-   * NAMED CAREFULLY. This used to be called `verifiedFacts` and was populated
-   * from the user's own account, which asserted a verification nobody performed
-   * — the exact false certainty the product exists to argue against. V0 has no
-   * mechanism to inspect a document, so this bucket will often and legitimately
-   * be EMPTY, and an empty bucket is the honest output rather than a failure.
+   * It may only be filled from a trustedArtifacts input — documents the system
+   * has actually read — and no such input exists yet. Until it does, anything
+   * here would be a verification nobody performed.
    */
   documentedFacts: string[];
   /** Stated by the user. Possibly true; it is testimony, not evidence. */
-  reportedFacts: string[];
+  reportedFacts: Fact[];
+  /** What the user says they can produce. Never treated as produced. */
+  reportedEvidenceAvailable: ReportedEvidence[];
   /** Readings the user has already layered on. Named so they can be doubted. */
   interpretations: string[];
   /** Gaps that would change the strategy if filled. Not trivia. */
@@ -46,14 +110,14 @@ export interface CaseFrame {
 
 export interface Actor {
   label: string;
-  goals: string[];
-  fears: string[];
-  resources: string[];
+  goals: ActorClaim[];
+  fears: ActorClaim[];
+  resources: ActorClaim[];
   /** Formal power to decide, distinct from informal influence. */
-  authority: string;
+  authority: ActorClaim;
   /** What this actor needs from others — where leverage usually lives. */
-  dependencies: string[];
-  likelyReactions: string[];
+  dependencies: ActorClaim[];
+  likelyReactions: ActorClaim[];
 }
 
 export interface ActorMap {
@@ -95,11 +159,24 @@ export const LEVERAGE_KINDS = [
 ] as const;
 export type LeverageKind = (typeof LEVERAGE_KINDS)[number];
 
+export type LeverageStatus = "present" | "absent" | "unknown";
+
 export interface LeveragePoint {
   kind: LeverageKind;
+  /**
+   * present / absent / unknown, and all ten kinds must appear.
+   *
+   * Skipping a kind reads as "considered and found nothing", which is a
+   * different statement from "not considered". The first run listed seven and
+   * silently dropped economic, status and emotional.
+   */
+  status: LeverageStatus;
   description: string;
-  /** Blank when the user genuinely has none of this kind. Honesty beats filler. */
-  availableToUser: boolean;
+  /** What the status rests on. "unknown" is a legitimate answer here too. */
+  basis: string;
+  /** What using it costs if it goes wrong. Empty when status is not present. */
+  risk: string;
+  reversibility: "reversible" | "hard_to_reverse" | "irreversible" | "not_applicable";
 }
 
 export interface LeverageMap {
@@ -215,19 +292,53 @@ export interface CountermoveSet {
 
 // ---------------------------------------------------------------- 8. final
 
-export interface Branch {
-  condition: string;
+/**
+ * Three lines, because one is not a script.
+ *
+ * The first run supplied a single sentence and passed the gate at >= 1. A user
+ * with five strategies and five countermoves and one thing to say has been
+ * given an essay and a fortune cookie.
+ *
+ * escalation is NOT a threat. It is the next procedural step said plainly —
+ * and softening it into nothing costs the user their position, which is a harm
+ * this system is explicitly not allowed to inflict.
+ */
+export const PHRASE_ROLES = ["opening", "boundary", "escalation"] as const;
+export type PhraseRole = (typeof PHRASE_ROLES)[number];
+
+export interface ExactPhrase {
+  role: PhraseRole;
+  purpose: string;
+  /** Said verbatim. Must be in the resolved response language. */
+  text: string;
+  useWhen: string;
+  doNotUseWhen: string;
+}
+
+/**
+ * Structured, not prose to be regex-mined later.
+ *
+ * The anti-banality grader used to look for the word "если" and therefore
+ * scored an English answer as missing branches it actually had. A structure is
+ * readable in any language.
+ */
+export interface IfThenBranch {
+  if: string;
   then: string;
+  rationale: string;
+  /** The observable event that means stop rather than continue down this path. */
+  stopCondition: string;
 }
 
 export interface FinalCasePlan {
   conclusion: string;
   missingInformation: string[];
   recommendedMove: string;
-  /** Sentences to actually say. Judged hardest by users, so judged hardest here. */
-  exactWords: string[];
+  /** At least three, one per role. Judged hardest by users, so judged hardest here. */
+  exactWords: ExactPhrase[];
   whatNotToSay: string[];
-  branches: Branch[];
+  /** At least three: conceded, stalled, escalated. */
+  ifThenBranches: IfThenBranch[];
   /** Observable signals that mean stop and reassess, not "be careful". */
   stopSignals: string[];
   fallbackPlan: string;
@@ -245,6 +356,9 @@ export interface CaseAnalysis {
   strategies: StrategySet;
   countermoves: CountermoveSet;
   plan: FinalCasePlan;
+  /** Resolved once, at the start, and applied to every user-facing field. */
+  language: ResolvedLanguage;
+  jurisdiction: Jurisdiction;
 }
 
 // ------------------------------------------------------------- validation
@@ -271,32 +385,129 @@ export interface ValidationResult<T> {
   problems: string[];
 }
 
+function facts(v: unknown): Fact[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((x, i) => {
+      if (typeof x === "string") return str(x) ? { id: `f${i + 1}`, text: str(x)! } : null;
+      const o = (x ?? {}) as Record<string, unknown>;
+      const text = str(o.text);
+      return text ? { id: str(o.id, 16) ?? `f${i + 1}`, text } : null;
+    })
+    .filter((f): f is Fact => f !== null)
+    .slice(0, 30);
+}
+
+function reportedEvidence(v: unknown): ReportedEvidence[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((x) => {
+      const o = (x ?? {}) as Record<string, unknown>;
+      const type = str(o.type, 80);
+      const description = str(o.description, 400);
+      // verificationStatus is FORCED, never read from the model: no code path
+      // in V0 could legitimately set anything else.
+      return type && description
+        ? { type, description, verificationStatus: "not_reviewed" as const }
+        : null;
+    })
+    .filter((e): e is ReportedEvidence => e !== null)
+    .slice(0, 20);
+}
+
 export function validateFrame(raw: unknown): ValidationResult<CaseFrame> {
   const problems: string[] = [];
   const o = (raw ?? {}) as Record<string, unknown>;
   const stakes = str(o.stakes, 1000);
   if (!stakes) problems.push("frame.stakes");
+
+  // Forced empty, not "dropped when suspicious". There is no trustedArtifacts
+  // input in V0, so anything here is by definition unverified — and the first
+  // live run put "user possesses the commit history" in it on the strength of
+  // the user saying so.
+  if (Array.isArray(o.documentedFacts) && o.documentedFacts.length > 0) {
+    problems.push("frame.documentedFactsNotPermitted");
+  }
+
   const value: CaseFrame = {
-    documentedFacts: strArr(o.documentedFacts),
-    reportedFacts: strArr(o.reportedFacts),
+    documentedFacts: [],
+    reportedFacts: facts(o.reportedFacts),
+    reportedEvidenceAvailable: reportedEvidence(o.reportedEvidenceAvailable),
     interpretations: strArr(o.interpretations),
     unknowns: strArr(o.unknowns),
     constraints: strArr(o.constraints),
     stakes: stakes ?? "",
   };
-  // A frame with nothing in any bucket means extraction failed, not that the
-  // situation is simple.
-  // documentedFacts may legitimately be empty — nothing here can inspect a
-  // document. Reported facts and interpretations may not both be empty: that
-  // means extraction failed, not that the situation is simple.
   if (value.reportedFacts.length + value.interpretations.length === 0) {
     problems.push("frame.empty");
   }
   return { ok: problems.length === 0, value, problems };
 }
 
-export function validateActors(raw: unknown): ValidationResult<ActorMap> {
+const UNKNOWN_VALUES = new Set(["unknown", "неизвестно", "не известно", "n/a", "-"]);
+
+/**
+ * Validate one claim about an actor.
+ *
+ * The rules exist because of a specific failure: a director mentioned once in
+ * passing was given goals, fears and predicted reactions, none of which the
+ * account supported. So:
+ *   reported  → must name the facts it rests on;
+ *   inferred  → must say how uncertain it is;
+ *   unknown   → must NOT carry specific invented content.
+ */
+function actorClaim(
+  raw: unknown,
+  factIds: Set<string>,
+  path: string,
+  problems: string[]
+): ActorClaim | null {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const value = typeof raw === "string" ? str(raw, 400) : str(o.value, 400);
+  if (!value) return null;
+
+  const basis = (["reported", "inferred", "unknown"] as const).find((b) => b === o.basis);
+  if (!basis) {
+    problems.push(`${path}.basis`);
+    return null;
+  }
+
+  const supportingFactIds = strArr(o.supportingFactIds, 10).filter((id) => factIds.has(id));
+  if (basis === "reported" && supportingFactIds.length === 0) {
+    problems.push(`${path}.reportedWithoutFacts`);
+  }
+  const uncertainty = str(o.uncertainty, 300);
+  if (basis === "inferred" && !uncertainty) problems.push(`${path}.inferredWithoutUncertainty`);
+  if (basis === "unknown" && !UNKNOWN_VALUES.has(value.toLowerCase())) {
+    // "unknown" with detailed content is the invented-biography failure wearing
+    // an honest label.
+    problems.push(`${path}.unknownWithContent`);
+  }
+
+  return {
+    value,
+    basis,
+    supportingFactIds,
+    ...(uncertainty ? { uncertainty } : {}),
+  };
+}
+
+function actorClaims(
+  raw: unknown,
+  factIds: Set<string>,
+  path: string,
+  problems: string[]
+): ActorClaim[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .slice(0, 8)
+    .map((c, i) => actorClaim(c, factIds, `${path}[${i}]`, problems))
+    .filter((c): c is ActorClaim => c !== null);
+}
+
+export function validateActors(raw: unknown, frame?: CaseFrame): ValidationResult<ActorMap> {
   const problems: string[] = [];
+  const factIds = new Set((frame?.reportedFacts ?? []).map((f) => f.id));
   const list = Array.isArray((raw as { actors?: unknown })?.actors)
     ? ((raw as { actors: unknown[] }).actors as unknown[])
     : [];
@@ -308,14 +519,18 @@ export function validateActors(raw: unknown): ValidationResult<ActorMap> {
       problems.push(`actors[${i}].label`);
       return;
     }
+    const p = `actors[${i}]`;
+    const authority =
+      actorClaim(o.authority, factIds, `${p}.authority`, problems) ??
+      { value: "unknown", basis: "unknown" as const, supportingFactIds: [] };
     actors.push({
       label,
-      goals: strArr(o.goals),
-      fears: strArr(o.fears),
-      resources: strArr(o.resources),
-      authority: str(o.authority, 500) ?? "",
-      dependencies: strArr(o.dependencies),
-      likelyReactions: strArr(o.likelyReactions),
+      goals: actorClaims(o.goals, factIds, `${p}.goals`, problems),
+      fears: actorClaims(o.fears, factIds, `${p}.fears`, problems),
+      resources: actorClaims(o.resources, factIds, `${p}.resources`, problems),
+      authority,
+      dependencies: actorClaims(o.dependencies, factIds, `${p}.dependencies`, problems),
+      likelyReactions: actorClaims(o.likelyReactions, factIds, `${p}.likelyReactions`, problems),
     });
   });
   if (actors.length === 0) problems.push("actors.empty");
@@ -354,22 +569,37 @@ export function validateHypotheses(raw: unknown): ValidationResult<HypothesisSet
 }
 
 export function validateLeverage(raw: unknown): ValidationResult<LeverageMap> {
+  const problems: string[] = [];
   const list = Array.isArray((raw as { points?: unknown })?.points)
     ? ((raw as { points: unknown[] }).points as unknown[])
     : [];
-  const points: LeveragePoint[] = [];
+  const byKind = new Map<LeverageKind, LeveragePoint>();
   for (const p of list.slice(0, 20)) {
     const o = (p ?? {}) as Record<string, unknown>;
     const kind = LEVERAGE_KINDS.find((k) => k === o.kind);
+    const status = (["present", "absent", "unknown"] as const).find((x) => x === o.status);
     const description = str(o.description, 600);
-    if (kind && description) {
-      points.push({ kind, description, availableToUser: o.availableToUser === true });
-    }
+    if (!kind || !status || !description) continue;
+    byKind.set(kind, {
+      kind,
+      status,
+      description,
+      basis: str(o.basis, 400) ?? "unknown",
+      risk: str(o.risk, 400) ?? "",
+      reversibility:
+        (["reversible", "hard_to_reverse", "irreversible", "not_applicable"] as const).find(
+          (r) => r === o.reversibility
+        ) ?? "not_applicable",
+    });
   }
+  // Every kind, every time. A missing kind reads as "considered and found
+  // nothing", which is a different claim from "not considered".
+  const missing = LEVERAGE_KINDS.filter((k) => !byKind.has(k));
+  if (missing.length) problems.push(`leverage.missing:${missing.join(",")}`);
   return {
-    ok: points.length > 0,
-    value: { points },
-    problems: points.length ? [] : ["leverage.empty"],
+    ok: problems.length === 0,
+    value: { points: LEVERAGE_KINDS.map((k) => byKind.get(k)).filter((p): p is LeveragePoint => !!p) },
+    problems,
   };
 }
 
@@ -379,14 +609,35 @@ export function validateLeverage(raw: unknown): ValidationResult<LeverageMap> {
  * alongside is dropped rather than carried, because the whole point of this
  * shape is that it cannot hold an operational instruction.
  */
+/**
+ * Phrases that mean "nothing was redirected" dressed as a redirect.
+ *
+ * The first live run attached a redirect object to ALL FIVE strategies with the
+ * reason "No unrelated leverage used." Nothing had been converted; the model
+ * filled an optional field because the schema offered it. That destroys the
+ * field's meaning: a real conversion is no longer distinguishable from filler.
+ */
+const NULL_REDIRECT_MARKERS = [
+  "no unrelated",
+  "none",
+  "n/a",
+  "not applicable",
+  "no redirect",
+  "не применялось",
+  "не использовалось",
+  "нет",
+];
+
 function redirect(raw: unknown): RedirectMetadata | null {
+  if (raw === null || raw === undefined) return null;
   const o = (raw ?? {}) as Record<string, unknown>;
   const category = REDIRECT_CATEGORIES.find((c) => c === o.category);
   const reason = str(o.reason, 200);
   const preservedObjective = str(o.preservedObjective, 200);
-  return category && reason && preservedObjective
-    ? { category, reason, preservedObjective }
-    : null;
+  if (!category || !reason || !preservedObjective) return null;
+  const marker = reason.toLowerCase();
+  if (NULL_REDIRECT_MARKERS.some((m) => marker.includes(m))) return null;
+  return { category, reason, preservedObjective };
 }
 
 export function validateStrategies(raw: unknown): ValidationResult<StrategySet> {
@@ -485,6 +736,56 @@ function validateRiskAssessment(raw: unknown): RiskAssessment | null {
   };
 }
 
+/** At least three, and all three roles distinct. One line is not a script. */
+export const MIN_EXACT_PHRASES = 3;
+/** Conceded, stalled, escalated — the three things the other side actually does. */
+export const MIN_IF_THEN_BRANCHES = 3;
+
+function phrases(raw: unknown, problems: string[]): ExactPhrase[] {
+  const out: ExactPhrase[] = [];
+  if (Array.isArray(raw)) {
+    for (const x of raw.slice(0, 8)) {
+      const o = (x ?? {}) as Record<string, unknown>;
+      const role = PHRASE_ROLES.find((r) => r === o.role);
+      const text = str(o.text, 800);
+      const purpose = str(o.purpose, 300);
+      if (!role || !text || !purpose) continue;
+      out.push({
+        role,
+        purpose,
+        text,
+        useWhen: str(o.useWhen, 300) ?? "",
+        doNotUseWhen: str(o.doNotUseWhen, 300) ?? "",
+      });
+    }
+  }
+  if (out.length < MIN_EXACT_PHRASES) problems.push("plan.exactWords.tooFew");
+  if (new Set(out.map((p) => p.role)).size < MIN_EXACT_PHRASES) {
+    problems.push("plan.exactWords.rolesNotDistinct");
+  }
+  return out;
+}
+
+function branches(raw: unknown, problems: string[]): IfThenBranch[] {
+  const out: IfThenBranch[] = [];
+  if (Array.isArray(raw)) {
+    for (const x of raw.slice(0, 10)) {
+      const o = (x ?? {}) as Record<string, unknown>;
+      const ifPart = str(o.if ?? o.condition, 400);
+      const thenPart = str(o.then, 800);
+      if (!ifPart || !thenPart) continue;
+      out.push({
+        if: ifPart,
+        then: thenPart,
+        rationale: str(o.rationale, 400) ?? "",
+        stopCondition: str(o.stopCondition, 400) ?? "",
+      });
+    }
+  }
+  if (out.length < MIN_IF_THEN_BRANCHES) problems.push("plan.ifThenBranches.tooFew");
+  return out;
+}
+
 export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
   const problems: string[] = [];
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -497,17 +798,8 @@ export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
   if (!risk) problems.push("plan.risk");
   if (!uncertainty) problems.push("plan.uncertainty");
 
-  const branchesRaw = Array.isArray(o.branches) ? (o.branches as unknown[]) : [];
-  const branches: Branch[] = [];
-  for (const b of branchesRaw.slice(0, 10)) {
-    const bo = (b ?? {}) as Record<string, unknown>;
-    const condition = str(bo.condition, 400);
-    const then = str(bo.then, 800);
-    if (condition && then) branches.push({ condition, then });
-  }
-
-  const exactWords = strArr(o.exactWords, 12);
-  if (exactWords.length === 0) problems.push("plan.exactWords");
+  const exactWords = phrases(o.exactWords, problems);
+  const ifThenBranches = branches(o.ifThenBranches ?? o.branches, problems);
 
   const ra = validateRiskAssessment(o.riskAssessment);
   if (!ra) problems.push("plan.riskAssessment");
@@ -520,7 +812,7 @@ export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
       recommendedMove: recommendedMove ?? "",
       exactWords,
       whatNotToSay: strArr(o.whatNotToSay),
-      branches,
+      ifThenBranches,
       stopSignals: strArr(o.stopSignals),
       fallbackPlan: str(o.fallbackPlan, 1500) ?? "",
       risk: risk ?? "yellow",
@@ -529,4 +821,40 @@ export function validatePlan(raw: unknown): ValidationResult<FinalCasePlan> {
     },
     problems,
   };
+}
+
+
+/**
+ * Light mode's whole output. Five fields, one call.
+ *
+ * Deliberately not a subset of FinalCasePlan: a truncated case file reads as a
+ * case file that failed, and this is a different, complete answer to a smaller
+ * question.
+ */
+export interface LightPlan {
+  shortAssessment: string;
+  nextMove: string;
+  oneExactPhrase: string;
+  oneRisk: string;
+  oneQuestion: string;
+  language: ResolvedLanguage;
+  jurisdiction: Jurisdiction;
+}
+
+export function validateLightPlan(raw: unknown): ValidationResult<Omit<LightPlan, "language" | "jurisdiction">> {
+  const problems: string[] = [];
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const f = (k: keyof LightPlan, max: number) => {
+    const v = str(o[k], max);
+    if (!v) problems.push(`light.${k}`);
+    return v ?? "";
+  };
+  const value = {
+    shortAssessment: f("shortAssessment", 800),
+    nextMove: f("nextMove", 600),
+    oneExactPhrase: f("oneExactPhrase", 600),
+    oneRisk: f("oneRisk", 400),
+    oneQuestion: f("oneQuestion", 400),
+  };
+  return { ok: problems.length === 0, value, problems };
 }

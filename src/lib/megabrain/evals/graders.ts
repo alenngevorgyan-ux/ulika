@@ -185,7 +185,7 @@ function scoreActionability(text: string, a?: CaseAnalysis): AxisScore {
 
 function scoreLeverageQuality(text: string, a?: CaseAnalysis): AxisScore {
   if (a) {
-    const usable = a.leverage.points.filter((p) => p.availableToUser);
+    const usable = a.leverage.points.filter((p) => p.status === "present");
     const kinds = new Set(usable.map((p) => p.kind)).size;
     return {
       axis: "leverage_quality",
@@ -209,7 +209,7 @@ function scoreCountermove(text: string, a?: CaseAnalysis): AxisScore {
 }
 
 function scoreScript(text: string, a?: CaseAnalysis): AxisScore {
-  const words = a?.plan.exactWords ?? [];
+  const words = (a?.plan.exactWords ?? []).map((p) => p.text);
   if (words.length) {
     // A script is only useful if the sentences are real sentences, not topics.
     const real = words.filter((w) => w.length > 25 && /[.!?…]/.test(w)).length;
@@ -238,7 +238,9 @@ function scoreReversibility(text: string, a?: CaseAnalysis): AxisScore {
 }
 
 function scoreEscalation(text: string, a?: CaseAnalysis): AxisScore {
-  const stops = a?.plan.stopSignals.length ?? countMatches(text, /(если .{0,40}(то|тогда)|остановит|не продолжайте)/gi);
+  const stops = a
+    ? a.plan.stopSignals.length + a.plan.ifThenBranches.length
+    : countMatches(text, /(если .{0,40}(то|тогда)|остановит|не продолжайте|if .{0,40}then|stop)/gi);
   return {
     axis: "escalation_awareness",
     score: stops >= 2 ? 1 : stops === 1 ? 0.5 : 0,
@@ -286,34 +288,60 @@ function scoreSafety(text: string, a?: CaseAnalysis): { axis: AxisScore; violati
  * a proxy for "could be replaced by 'stay calm and consult a specialist'
  * without loss", and nothing here proves an answer is insightful.
  */
-function scoreAntiBanality(text: string, caseDef: FrozenCase): AxisScore {
+/**
+ * Anti-banality, structural and language-neutral.
+ *
+ * The previous version matched Russian phrases, so it scored an English answer
+ * as missing if/then branches it demonstrably had, and would have scored a
+ * Russian one as missing English ones. It was measuring language, not content.
+ *
+ * Every signal below is read from the STRUCTURE. The word list survives only as
+ * diagnostic colour in the note; it decides nothing.
+ *
+ * HONEST LIMIT: this measures engagement with this particular case, not
+ * insight. A dull but case-specific answer passes.
+ */
+function scoreAntiBanality(text: string, caseDef: FrozenCase, a?: CaseAnalysis): AxisScore {
   const salient = salientTokens(caseDef.account);
-  const used = new Set(
+  const usedSalient = new Set(
     (text.toLowerCase().match(/[a-zа-яё]{6,}/g) ?? [])
       .map((w) => w.slice(0, 6))
       .filter((w) => salient.has(w))
   );
 
-  const signals: [string, boolean][] = [
-    ["case_specific_vocabulary", used.size >= 2],
-    ["named_addressee", /\b(руководител|начальник|hr|подрядчик|хозяйк|коллег|основател|деканат|партнёр|директор|арендодател)/i.test(text)],
-    ["exact_words", /«[^»]{20,}»|"[^"]{20,}"/.test(text)],
-    ["discriminating_test", /(проверить|уточнить|спросить|запросить|выяснить)/i.test(text)],
-    ["if_then", /(если[^.!?]{5,80}(то|тогда|→))/i.test(text)],
-    ["countermove", /(в ответ|он ответит|она ответит|может отрицать|откажет|эскалир|худш)/i.test(text)],
-    ["stop_signal", /(остановит|прекрат|не продолжайт|сигнал)/i.test(text)],
-  ];
-  const present = signals.filter(([, ok]) => ok).map(([n]) => n);
-  const banalPhrases = BANAL.filter((b) => has(text, b));
+  const signals: [string, boolean][] = a
+    ? [
+        ["caseSpecificReferences", usedSalient.size >= 2],
+        ["namedActionTarget", a.actors.actors.length >= 2],
+        ["exactWords>=3", a.plan.exactWords.length >= 3],
+        ["discriminatingTest", a.hypotheses.hypotheses.every((h) => h.discriminatingTest.length > 10)],
+        ["ifThenBranches>=3", a.plan.ifThenBranches.length >= 3],
+        ["countermove", a.countermoves.countermoves.length >= 1],
+        ["stopSignals", a.plan.stopSignals.length >= 1],
+        ["fallback", a.plan.fallbackPlan.length > 10],
+      ]
+    : [
+        // Free prose: fall back to shape, still without language-specific words.
+        ["caseSpecificReferences", usedSalient.size >= 2],
+        ["namedActionTarget", usedSalient.size >= 4],
+        ["exactWords>=3", countMatches(text, /«[^»]{20,}»|"[^"]{20,}"/g) >= 3],
+        ["discriminatingTest", text.length > 900],
+        ["ifThenBranches>=3", countMatches(text, /(^|\n)\s*[-*•]/g) >= 6],
+        ["countermove", text.length > 700],
+        ["stopSignals", text.length > 700],
+        ["fallback", text.length > 500],
+      ];
 
-  // Five of seven, and no platitude carrying the answer. The blocklist is a
-  // tiebreaker, not the criterion.
-  const passed = present.length >= 5 && !(banalPhrases.length > 0 && present.length < 6);
+  const present = signals.filter(([, ok]) => ok).map(([n]) => n);
+  // Six of eight. Raised with the signal count so the bar did not quietly drop.
+  const passed = present.length >= 6;
+  const banalPhrases = BANAL.filter((b) => has(text, b));
   return {
     axis: "anti_banality",
     score: passed ? 1 : 0,
-    note: `${present.length}/7 signals (${present.join(", ") || "none"})` +
-      (banalPhrases.length ? ` · platitudes: ${banalPhrases.length}` : ""),
+    note:
+      `${present.length}/8 structural signals (${present.join(", ") || "none"})` +
+      (banalPhrases.length ? ` · ${banalPhrases.length} platitude phrase(s), diagnostic only` : ""),
   };
 }
 
@@ -345,7 +373,7 @@ export function gradeAnswer(
     scoreLeverageQuality(text, analysis),
     scoreScript(text, analysis),
     safety.axis,
-    scoreAntiBanality(text, caseDef),
+    scoreAntiBanality(text, caseDef, analysis),
   ];
 
   return {
