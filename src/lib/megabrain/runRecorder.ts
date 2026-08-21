@@ -26,6 +26,14 @@ import type { LedgerEntry } from "./costLedger";
 
 export type RunStatus = "started" | "stage_recorded" | "complete" | "incomplete";
 
+/**
+ * A note on totals recorded here: `reportedSpendUsd` is what the provider said,
+ * and is the only figure a bill can be checked against. `budgetedSpendUsd`
+ * includes our own conservative estimates for calls the provider never priced,
+ * and `hasUnknownCharges` says whether it does. They are written as separate
+ * fields so a reader is never handed an estimate labelled as actual spend.
+ */
+
 export interface RunFailure {
   /** Pipeline stage that failed, when known. */
   stage: string | null;
@@ -44,12 +52,23 @@ export interface RunFailure {
   errorKind: string;
   /** Our own failure code, when the error carries one. */
   internalCode: string | null;
+  /** Did a request actually leave the process? Independent of what it cost. */
+  requestSent: boolean;
   /**
-   * True when the failing call had already been charged. Distinguishes "we
-   * stopped before spending" from "we spent and then stopped", which is the
-   * difference a bill will show.
+   * What is known about money for the failing call. Three states, because two
+   * were not enough.
+   *
+   *   not_incurred — nothing was sent, so nothing was charged.
+   *   reported     — the provider told us a charge, and we recorded it.
+   *   unknown      — a request left and may well have been billed, but no
+   *                  usable amount came back. An HTTP error is this case: the
+   *                  provider may have charged before failing, and treating it
+   *                  as a proven charge is as wrong as treating it as free.
+   *
+   * The previous single boolean called every ProviderHttpError a proven charge,
+   * which asserted more than the evidence supports.
    */
-  chargeAlreadyIncurred: boolean;
+  chargeStatus: "not_incurred" | "reported" | "unknown";
 }
 
 export class RunRecorder {
@@ -126,8 +145,25 @@ export function describeFailure(e: unknown, currentStage: string | null): RunFai
     providerCode: isProviderHttp && typeof err?.code === "string" ? err.code : null,
     errorKind: typeof err?.name === "string" ? err.name : "Error",
     internalCode: !isProviderHttp && typeof err?.code === "string" ? err.code : null,
-    // An AccountingError only exists because a call completed and was billed.
-    // A BudgetExceededError means the opposite: nothing was sent.
-    chargeAlreadyIncurred: err?.name === "AccountingError" || isProviderHttp,
+    ...chargeFacts(err, isProviderHttp),
   };
+}
+
+function chargeFacts(
+  err: { name?: string; chargeReported?: boolean } | undefined,
+  isProviderHttp: boolean
+): { requestSent: boolean; chargeStatus: RunFailure["chargeStatus"] } {
+  // A budget refusal happens before the request is built. Nothing left.
+  if (err?.name === "BudgetExceededError") {
+    return { requestSent: false, chargeStatus: "not_incurred" };
+  }
+  // The request went out and the provider returned an error status. Whether it
+  // billed for the attempt is genuinely not knowable from here.
+  if (isProviderHttp) return { requestSent: true, chargeStatus: "unknown" };
+  // Accounting only runs on a completed call. Whether the amount is known is
+  // the whole question, and the error carries the answer.
+  if (err?.name === "AccountingError") {
+    return { requestSent: true, chargeStatus: err.chargeReported ? "reported" : "unknown" };
+  }
+  return { requestSent: false, chargeStatus: "not_incurred" };
 }

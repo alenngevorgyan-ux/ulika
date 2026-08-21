@@ -37,15 +37,29 @@ export interface LedgerEntry {
   reasoningTokens: number;
   outputTokens: number;
   latencyMs: number;
-  estimatedCostUsd: number;
+  /**
+   * What the provider said it charged. NULL when it said nothing.
+   *
+   * Null is the honest value and must stay null. Substituting the reservation
+   * here would turn a number we chose into a number we were billed.
+   */
+  actualCostUsd: number | null;
+  /**
+   * Our own conservative figure for this call, kept SEPARATELY.
+   *
+   * Used for budgeting when the real charge is unknown. It is NOT a guaranteed
+   * upper bound: it comes from a price table and a token estimate, and a
+   * provider is obliged to respect neither. Calling it a ceiling would be a
+   * promise this code cannot keep.
+   */
+  conservativeEstimateUsd: number;
   /** Monotonic across the whole tree, so allDeep() can order truthfully. */
   seq: number;
   /**
    * Where the figure came from.
-   *   provider   — the provider reported it. The real charge.
-   *   unreported — the provider charged but did not say how much. The number is
-   *                the RESERVATION, i.e. a conservative upper bound, not a fact.
-   *   table      — derived from the price table. Preflight only.
+   *   provider   — the provider reported a charge.
+   *   unreported — a call completed and was presumably billed, amount unknown.
+   *   table      — never billed; a preflight refusal.
    */
   costSource: "provider" | "unreported" | "table";
   /**
@@ -72,7 +86,8 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
   "reasoningTokens",
   "outputTokens",
   "latencyMs",
-  "estimatedCostUsd",
+  "actualCostUsd",
+  "conservativeEstimateUsd",
   "seq",
   "costSource",
   "accountingFailure",
@@ -89,7 +104,13 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
  * request, and the request contains the account.
  */
 export class AccountingError extends Error {
-  constructor(readonly stage: string, readonly code: AccountingFailure, detail = "") {
+  constructor(
+    readonly stage: string,
+    readonly code: AccountingFailure,
+    detail = "",
+    /** Whether the provider reported a usable charge for the failing call. */
+    readonly chargeReported: boolean = false
+  ) {
     super(`Accounting refused after "${stage}": ${code}${detail ? ` (${detail})` : ""}`);
     this.name = "AccountingError";
   }
@@ -189,17 +210,42 @@ export class CostLedger {
     return new CostLedger(mode, Math.min(cap, this.remainingUsd), this);
   }
 
-  /** Own spend plus everything spent by envelopes carved from this ledger. */
-  get spentUsd(): number {
+  /**
+   * What the budget is measured against: real charges where known, our own
+   * conservative figure where not.
+   *
+   * NOT a statement about the bill. It mixes reported amounts with estimates,
+   * and `hasUnknownCharges` says whether it does. Presenting this as actual
+   * spend is exactly the conflation this split exists to stop.
+   */
+  get budgetedSpendUsd(): number {
     const own = this.entries.reduce(
-      (sum, e) => sum + (e.stoppedByBudgetGuard ? 0 : e.estimatedCostUsd),
+      (sum, e) =>
+        sum + (e.stoppedByBudgetGuard ? 0 : e.actualCostUsd ?? e.conservativeEstimateUsd),
       0
     );
-    return own + this.children.reduce((sum, c) => sum + c.spentUsd, 0);
+    return own + this.children.reduce((sum, c) => sum + c.budgetedSpendUsd, 0);
+  }
+
+  /** Only what the provider actually reported. A figure a bill can be checked against. */
+  get reportedSpendUsd(): number {
+    const own = this.entries.reduce(
+      (sum, e) => sum + (e.stoppedByBudgetGuard ? 0 : e.actualCostUsd ?? 0),
+      0
+    );
+    return own + this.children.reduce((sum, c) => sum + c.reportedSpendUsd, 0);
+  }
+
+  /** True when at least one completed call was never priced by the provider. */
+  get hasUnknownCharges(): boolean {
+    return (
+      this.entries.some((e) => !e.stoppedByBudgetGuard && e.actualCostUsd === null) ||
+      this.children.some((c) => c.hasUnknownCharges)
+    );
   }
 
   get remainingUsd(): number {
-    return Math.max(0, this.capUsd - this.spentUsd);
+    return Math.max(0, this.capUsd - this.budgetedSpendUsd);
   }
 
   /** This ledger's own entries. Excludes envelopes carved from it. */
@@ -242,8 +288,8 @@ export class CostLedger {
     // Must fit this budget AND every budget above it. Checking only the nearest
     // one is how a child envelope silently overruns its parent.
     const blocked =
-      this.spentUsd + projectedUsd > this.capUsd ||
-      this.ancestors().some((a) => a.spentUsd + projectedUsd > a.capUsd);
+      this.budgetedSpendUsd + projectedUsd > this.capUsd ||
+      this.ancestors().some((a) => a.budgetedSpendUsd + projectedUsd > a.capUsd);
     if (blocked) {
       this.entries.push({
         provider: spec.provider,
@@ -254,7 +300,8 @@ export class CostLedger {
         reasoningTokens: 0,
         outputTokens: 0,
         latencyMs: 0,
-        estimatedCostUsd: projectedUsd,
+        actualCostUsd: null,
+        conservativeEstimateUsd: projectedUsd,
         costSource: "table",
         accountingFailure: null,
         seq: SEQ++,
@@ -262,7 +309,7 @@ export class CostLedger {
         stoppedByBudgetGuard: true,
       });
       this.onRecord?.(this.entries[this.entries.length - 1]);
-      throw new BudgetExceededError(stage, this.spentUsd + projectedUsd, this.capUsd);
+      throw new BudgetExceededError(stage, this.budgetedSpendUsd + projectedUsd, this.capUsd);
     }
     this.onAttempt?.({
       stage,
@@ -310,10 +357,6 @@ export class CostLedger {
     // a future provider without cost reporting would need it back deliberately,
     // not silently.
     const fromProvider = usage.actualCostUsd !== null;
-    // When the provider charged but did not say how much, the reservation is
-    // the only defensible number: it is the upper bound we agreed to, and
-    // over-stating spend is the safe direction for a budget.
-    const recordedCost = fromProvider ? usage.actualCostUsd! : (args.reservedUsd ?? 0);
     const entry: LedgerEntry = {
       provider: spec.provider,
       model: spec.slug,
@@ -323,7 +366,11 @@ export class CostLedger {
       reasoningTokens: usage.reasoningTokens,
       outputTokens: usage.outputTokens,
       latencyMs,
-      estimatedCostUsd: recordedCost,
+      actualCostUsd: usage.actualCostUsd,
+      // Kept apart from the reported figure on purpose. Budgeting needs a
+      // number; the bill needs the truth; they are not the same number.
+      conservativeEstimateUsd:
+        args.reservedUsd ?? costOf(spec, usage.inputTokens, usage.outputTokens),
       costSource: fromProvider ? "provider" : "unreported",
       accountingFailure: failure,
       seq: SEQ++,
@@ -333,7 +380,7 @@ export class CostLedger {
     this.entries.push(entry);
     this.onRecord?.(entry);
     // Only now. The evidence is on disk; the pipeline stops.
-    if (failure) throw new AccountingError(stage, failure);
+    if (failure) throw new AccountingError(stage, failure, "", fromProvider);
     return entry;
   }
 }

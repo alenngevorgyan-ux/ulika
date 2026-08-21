@@ -195,18 +195,24 @@ async function live() {
       { transport, ledger: runLedger.envelope(per.judgeReserved) }
     );
     comparisons.push(verdict);
-    console.log(`${verdict.winner}  (spent $${runLedger.spentUsd.toFixed(3)})`);
+    console.log(`${verdict.winner}  (spent $${runLedger.budgetedSpendUsd.toFixed(3)})`);
   }
 
   } catch (e) {
     // The money is already spent; what is left to protect is the record of it.
     recorder.finish("incomplete", describeFailure(e, currentStage), {
-      spentUsd: runLedger.spentUsd,
+      budgetedSpendUsd: runLedger.budgetedSpendUsd,
+      reportedSpendUsd: runLedger.reportedSpendUsd,
+      hasUnknownCharges: runLedger.hasUnknownCharges,
       capUsd: MAX_USD,
       completedCases: comparisons.length,
     });
     console.error(`\nRUN INCOMPLETE at stage "${currentStage}". Journal: ${recorder.file.replace(process.cwd(), ".")}`);
-    console.error(`Spent before the failure: $${runLedger.spentUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}.`);
+    console.error(
+      `Provider-reported before the failure: $${runLedger.reportedSpendUsd.toFixed(4)}; ` +
+        `budgeted incl. estimates: $${runLedger.budgetedSpendUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}` +
+        (runLedger.hasUnknownCharges ? " (contains unpriced calls — actual spend unknown)" : "")
+    );
     // The last attempt line names the call that died, which the ledger cannot:
     // a failed call never produces a ledger entry.
     console.error("The last 'attempt' line in the journal names the failing stage and model.");
@@ -227,9 +233,19 @@ async function live() {
   // whether an answer is worth comparing; only quality speaks to "better".
   console.log(`structural gates     : engine ${(engineVerdict.gatesPassedRate * 100).toFixed(0)}%, baseline ${(baselineVerdict.gatesPassedRate * 100).toFixed(0)}%  (completeness, NOT a quality win)`);
   console.log(`quality score        : engine ${engineVerdict.meanQuality.toFixed(2)}, baseline ${baselineVerdict.meanQuality.toFixed(2)}`);
-  console.log(`total spent          : $${runLedger.spentUsd.toFixed(3)} of $${MAX_USD.toFixed(2)}`);
+  // Two numbers, never one. The first is what a bill can be checked against;
+  // the second is what the budget was measured with and includes our estimates.
+  console.log(`provider-reported    : $${runLedger.reportedSpendUsd.toFixed(4)}`);
+  console.log(`budgeted (incl. est.): $${runLedger.budgetedSpendUsd.toFixed(4)} of $${MAX_USD.toFixed(2)}` +
+    (runLedger.hasUnknownCharges ? "  — CONTAINS UNPRICED CALLS, actual spend unknown" : ""));
 
-  recorder.finish("complete", undefined, { spentUsd: runLedger.spentUsd, capUsd: MAX_USD, completedCases: comparisons.length });
+  recorder.finish("complete", undefined, {
+    budgetedSpendUsd: runLedger.budgetedSpendUsd,
+    reportedSpendUsd: runLedger.reportedSpendUsd,
+    hasUnknownCharges: runLedger.hasUnknownCharges,
+    capUsd: MAX_USD,
+    completedCases: comparisons.length,
+  });
   const out = join(OUT_DIR, `megabrain-${Date.now()}.json`);
   // The ledger carries no conversation content, so the report is safe to keep.
   writeFileSync(out, JSON.stringify({ config: CONFIG_ID, comparisons, cmp, engineVerdict, baselineVerdict, ledger: runLedger.allDeep() }, null, 2));

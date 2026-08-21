@@ -67,7 +67,7 @@ describe("budget guard stops before spending, not after", () => {
     const ledger = new CostLedger("quick");
     try { ledger.reserve("s", MODELS["claude-sonnet-5"], "x".repeat(30_000), 4000); } catch { /* expected */ }
     expect(ledger.all()[0].stoppedByBudgetGuard).toBe(true);
-    expect(ledger.spentUsd).toBe(0);
+    expect(ledger.budgetedSpendUsd).toBe(0);
   });
   it("reserves against the OUTPUT CEILING, not a hoped-for length", () => {
     // Reserving against typical output is how a long generation walks the cap.
@@ -99,7 +99,7 @@ describe("budget guard stops before spending, not after", () => {
     const entries = probe.allDeep();
     const spendBeforeRetry = entries
       .slice(0, entries.findIndex((e) => e.stage === "strategise") + 1)
-      .reduce((n, e) => n + e.estimatedCostUsd, 0);
+      .reduce((n, e) => n + (e.actualCostUsd ?? 0), 0);
     const retryReservation = costOf(
       modelFor(resolveConfiguration(), "strategise"),
       estimateTokens("x".repeat(1)) + 0,
@@ -110,7 +110,7 @@ describe("budget guard stops before spending, not after", () => {
     await expect(
       runCase({ account: "x", ledger: shared }, fixtureTransport({ strategiseGarbageFirst: true }))
     ).rejects.toThrow(BudgetExceededError);
-    expect(shared.spentUsd).toBeLessThan(shared.capUsd);
+    expect(shared.budgetedSpendUsd).toBeLessThan(shared.capUsd);
   });
 
   it("does leave retry headroom at the full standard cap", async () => {
@@ -155,7 +155,7 @@ describe("the ledger records cost and nothing else", () => {
       stage: "extract", spec: MODELS["claude-sonnet-5"], latencyMs: 1,
       usage: { inputTokens: 1_000_000, cachedTokens: 900_000, reasoningTokens: 0, outputTokens: 0, actualCostUsd: 0.4, rawCost: 0.4 },
     });
-    expect(e.estimatedCostUsd).toBe(0.4);
+    expect(e.actualCostUsd).toBe(0.4);
     expect(e.costSource).toBe("provider");
   });
 
@@ -188,7 +188,7 @@ describe("a benchmark budget never relaxes the engine budget", () => {
     await runCase({ account: FROZEN_CASES[0].account, ledger: benchmark }, fixtureTransport({}));
     const engineEnvelope = benchmark.all().length === 0;
     expect(engineEnvelope).toBe(true); // engine spent inside a child, not here
-    expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
+    expect(benchmark.budgetedSpendUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
   });
 
   it("refuses an engine retry that would cross the real $0.10 Standard cap, with the $0.15 command budget still open", async () => {
@@ -214,7 +214,7 @@ describe("a benchmark budget never relaxes the engine budget", () => {
     ).rejects.toThrow(BudgetExceededError);
 
     // The engine stopped at its own $0.10, not at the command's $0.15.
-    expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
+    expect(benchmark.budgetedSpendUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
     expect(benchmark.remainingUsd).toBeGreaterThan(0.03);
     // extract, analyse, one strategise attempt. The retry was never sent.
     expect(callCount.n).toBe(3);
@@ -231,7 +231,7 @@ describe("a benchmark budget never relaxes the engine budget", () => {
         fixtureTransport({ strategiseGarbageFirst: true, stageCosts: { extract: 0.001, analyse: 0.004, strategise: 0.004 } })
       )
     ).resolves.toBeTruthy();
-    expect(benchmark.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
+    expect(benchmark.budgetedSpendUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
   });
 
   it("does not let the baseline or judge borrow the engine's remainder", async () => {
@@ -253,7 +253,7 @@ describe("a benchmark budget never relaxes the engine budget", () => {
       stage: "extract", spec: MODELS["grok-4.3"], latencyMs: 1,
       usage: { inputTokens: 1, cachedTokens: 0, reasoningTokens: 0, outputTokens: 1, actualCostUsd: 0.02, rawCost: 0.02 },
     });
-    expect(parent.spentUsd).toBeCloseTo(0.02, 6);
+    expect(parent.budgetedSpendUsd).toBeCloseTo(0.02, 6);
     expect(parent.remainingUsd).toBeCloseTo(0.08, 6);
   });
 
@@ -355,7 +355,7 @@ describe("a Standard case never actually exceeds $0.10", () => {
     const entries = probe.allDeep();
     const spendBeforeRetry = entries
       .slice(0, entries.findIndex((e) => e.stage === "strategise") + 1)
-      .reduce((n, e) => n + e.estimatedCostUsd, 0);
+      .reduce((n, e) => n + (e.actualCostUsd ?? 0), 0);
     const strategiseCall = probeSpy.find((r) => r.jsonSchema?.name === "case_plan")!;
     // Includes the same safety margin the guard applies, or the cap lands
     // outside the narrow window where attempt one fits and the retry does not.
@@ -374,7 +374,7 @@ describe("a Standard case never actually exceeds $0.10", () => {
 
     // extract, analyse, one strategise attempt. The retry was refused.
     expect(callCount.n).toBe(3);
-    expect(shared.spentUsd).toBeLessThan(shared.capUsd);
+    expect(shared.budgetedSpendUsd).toBeLessThan(shared.capUsd);
   });
 
   it("records the refusal in the ledger rather than failing silently", async () => {
@@ -383,7 +383,7 @@ describe("a Standard case never actually exceeds $0.10", () => {
     const entries = probe.allDeep();
     const spendBeforeRetry = entries
       .slice(0, entries.findIndex((e) => e.stage === "strategise") + 1)
-      .reduce((n, e) => n + e.estimatedCostUsd, 0);
+      .reduce((n, e) => n + (e.actualCostUsd ?? 0), 0);
     const shared = new CostLedger("standard", spendBeforeRetry + 0.0001);
     try {
       await runCase({ account: "x", ledger: shared }, fixtureTransport({ strategiseGarbageFirst: true }));
@@ -399,7 +399,7 @@ describe("a Standard case never actually exceeds $0.10", () => {
         fixtureTransport({ strategiseGarbageFirst: true })
       );
     } catch { /* a refusal here is an acceptable outcome; overspending is not */ }
-    expect(shared.spentUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
+    expect(shared.budgetedSpendUsd).toBeLessThanOrEqual(MODE_CAPS.standard);
   });
 });
 
@@ -572,7 +572,7 @@ describe("the run-level cap is global, not per case", () => {
         }
       })()
     ).rejects.toThrow(BudgetExceededError);
-    expect(shared.spentUsd).toBeLessThanOrEqual(shared.capUsd);
+    expect(shared.budgetedSpendUsd).toBeLessThanOrEqual(shared.capUsd);
   });
 
   it("never lets recorded spend exceed the cap it was created with", async () => {
@@ -582,7 +582,7 @@ describe("the run-level cap is global, not per case", () => {
         await runCase({ account: "x", ledger: shared }, fixtureTransport({}));
       }
     } catch { /* expected */ }
-    expect(shared.spentUsd).toBeLessThanOrEqual(0.03);
+    expect(shared.budgetedSpendUsd).toBeLessThanOrEqual(0.03);
   });
 });
 
@@ -1068,15 +1068,18 @@ describe("the run journal survives a mid-run failure", () => {
 
     const recorded = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.t === "ledger");
     expect(recorded).toHaveLength(1);
-    expect(recorded[0].estimatedCostUsd).toBe(9.99);
+    expect(recorded[0].actualCostUsd).toBe(9.99);
     expect(recorded[0].accountingFailure).toBe("COST_ABOVE_RESERVED");
     expect(recorded[0].costSource).toBe("provider");
     // And the money is counted, not quietly dropped from the total.
-    expect(ledger.spentUsd).toBeCloseTo(9.99, 6);
+    expect(ledger.budgetedSpendUsd).toBeCloseTo(9.99, 6);
     rmSync(path);
   });
 
-  it("records an unpriced charge at its reserved upper bound, marked as not a fact", async () => {
+  it("leaves the actual cost UNKNOWN when the provider did not price the call", async () => {
+    // The reservation is not evidence of what was billed. Storing it in the
+    // actual-cost field would turn a number we chose into a number we were
+    // charged, which is the conflation this split exists to prevent.
     const ledger = new CostLedger("standard", 10);
     await expect(
       runCase({ account: "x", ledger }, fixtureTransport({ brokenCost: { value: undefined } }))
@@ -1084,9 +1087,27 @@ describe("the run journal survives a mid-run failure", () => {
     const [entry] = ledger.allDeep();
     expect(entry.costSource).toBe("unreported");
     expect(entry.accountingFailure).toBe("COST_MISSING");
-    // Conservative: over-stating spend is the safe direction for a budget.
-    expect(entry.estimatedCostUsd).toBeGreaterThan(0);
-    expect(ledger.spentUsd).toBe(entry.estimatedCostUsd);
+    expect(entry.actualCostUsd).toBeNull();
+    expect(entry.conservativeEstimateUsd).toBeGreaterThan(0);
+  });
+
+  it("keeps the two totals apart and flags that one contains estimates", async () => {
+    const ledger = new CostLedger("standard", 10);
+    await expect(
+      runCase({ account: "x", ledger }, fixtureTransport({ brokenCost: { value: undefined } }))
+    ).rejects.toThrow(/COST_MISSING/);
+    // Nothing was reported, so the bill-checkable figure is zero — not the
+    // estimate, and not silently the same number.
+    expect(ledger.reportedSpendUsd).toBe(0);
+    expect(ledger.budgetedSpendUsd).toBeGreaterThan(0);
+    expect(ledger.hasUnknownCharges).toBe(true);
+  });
+
+  it("reports a clean run with both totals equal and no unknown flag", async () => {
+    const ledger = new CostLedger("standard", 10);
+    await runCase({ account: "x", ledger }, fixtureTransport({}));
+    expect(ledger.hasUnknownCharges).toBe(false);
+    expect(ledger.reportedSpendUsd).toBeCloseTo(ledger.budgetedSpendUsd, 8);
   });
 
   it("records a model swap before refusing, since that call was billed too", async () => {
@@ -1096,20 +1117,49 @@ describe("the run journal survives a mid-run failure", () => {
     ).rejects.toThrow(/MODEL_MISMATCH/);
     const [entry] = ledger.allDeep();
     expect(entry.accountingFailure).toBe("MODEL_MISMATCH");
-    expect(ledger.spentUsd).toBeGreaterThan(0);
+    expect(ledger.budgetedSpendUsd).toBeGreaterThan(0);
   });
 
-  it("distinguishes stopped-before-spending from spent-then-stopped", async () => {
-    let budgetFailure, accountingFailure;
+  it("reports an HTTP failure as request-sent with the charge UNKNOWN, not proven", async () => {
+    // A 404 means the request left. Whether the provider billed for the attempt
+    // is not knowable from here, and claiming either way asserts more than the
+    // evidence supports.
+    let f;
+    try {
+      await runCase({ account: "x" }, fixtureTransport({ failAtStrategise: true }));
+    } catch (e) { f = describeFailure(e, "engine"); }
+    expect(f!.requestSent).toBe(true);
+    expect(f!.chargeStatus).toBe("unknown");
+    expect(f!.httpStatus).toBe(404);
+  });
+
+  it("reports a budget refusal as nothing sent and nothing charged", async () => {
+    let f;
     try {
       await runCase({ account: "x", ledger: new CostLedger("standard", 0.0001) }, fixtureTransport({}));
-    } catch (e) { budgetFailure = describeFailure(e, "extract"); }
+    } catch (e) { f = describeFailure(e, "extract"); }
+    expect(f!.requestSent).toBe(false);
+    expect(f!.chargeStatus).toBe("not_incurred");
+  });
+
+  it("reports an overcharge as a REPORTED charge, since the provider priced it", async () => {
+    let f;
     try {
       await runCase({ account: "x", ledger: new CostLedger("standard", 10) }, fixtureTransport({ overcharge: true }));
-    } catch (e) { accountingFailure = describeFailure(e, "extract"); }
-    // The difference a bill will show, so the journal has to show it too.
-    expect(budgetFailure!.chargeAlreadyIncurred).toBe(false);
-    expect(accountingFailure!.chargeAlreadyIncurred).toBe(true);
+    } catch (e) { f = describeFailure(e, "extract"); }
+    expect(f!.requestSent).toBe(true);
+    expect(f!.chargeStatus).toBe("reported");
+  });
+
+  it("reports a missing cost as request-sent with the charge unknown", async () => {
+    // Same request-sent status as an overcharge, different charge status. The
+    // two facts are independent, which is why they are two fields.
+    let f;
+    try {
+      await runCase({ account: "x", ledger: new CostLedger("standard", 10) }, fixtureTransport({ brokenCost: { value: undefined } }));
+    } catch (e) { f = describeFailure(e, "extract"); }
+    expect(f!.requestSent).toBe(true);
+    expect(f!.chargeStatus).toBe("unknown");
   });
 
   it("states its own limit rather than promising crash-proof persistence", () => {
