@@ -271,7 +271,14 @@ export async function POST(req: NextRequest) {
     const retrieval = flow.manual ? retrieveManualKnowledge(flow.manual.knowledge, contextualAccount) : null;
     if (flow.manual && retrieval) {
       flow.manual.retrieval = {
-        cards: retrieval.cards.map((card) => ({ id: card.id, name: card.name, sourceIds: card.source_ids, evidenceStrength: card.evidence_strength })),
+        cards: retrieval.cards.map((card) => ({
+          id: card.id,
+          name: card.name,
+          sourceIds: card.source_ids,
+          sourceNames: card.source_ids.map((id) => id === "ulika-original-notes" ? "ULIKA original knowledge notes" : id),
+          evidenceStrength: card.evidence_strength,
+          relevanceScore: card.relevance_score,
+        })),
         latencyMs: retrieval.latencyMs,
         tokenEstimate: retrieval.tokenEstimate,
         limitation: retrieval.limitation,

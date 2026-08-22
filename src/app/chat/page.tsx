@@ -28,10 +28,16 @@ interface CaseFlowView {
   budgetedSpendUsd?: number;
   manual?: {
     retrieval?: {
-      cards: { id: string; name: string; sourceIds: string[]; evidenceStrength: string }[];
+      cards: { id: string; name: string; sourceIds: string[]; sourceNames: string[]; evidenceStrength: string; relevanceScore: number }[];
       latencyMs: number;
       tokenEstimate: number;
       limitation: string | null;
+    } | null;
+    telemetry?: {
+      reportedSpendUsd: number;
+      conservativeSpendUsd: number;
+      latencyMs: number;
+      calls: { stage: string; model: string; reasoningTokens: number; inputTokens: number; outputTokens: number; cost: number | null }[];
     } | null;
   } | null;
 }

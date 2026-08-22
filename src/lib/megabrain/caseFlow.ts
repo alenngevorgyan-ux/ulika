@@ -53,7 +53,7 @@ export interface CaseFlow {
     fixedAnswers: Record<string, string>;
     memoryContext: string;
     retrieval: {
-      cards: { id: string; name: string; sourceIds: string[]; evidenceStrength: string }[];
+      cards: { id: string; name: string; sourceIds: string[]; sourceNames: string[]; evidenceStrength: string; relevanceScore: number }[];
       latencyMs: number;
       tokenEstimate: number;
       limitation: string | null;

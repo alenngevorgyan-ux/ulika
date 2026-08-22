@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { retrieveKnowledge } from "../knowledge/retrieve";
+import { ALL_KNOWLEDGE } from "../knowledge/retrieve";
 import type { KnowledgeMode } from "./manualPresets";
 
 export type KnowledgeLayer = "ULIKA_CORE" | "EVIDENCE" | "ULIKA_CASE_PATTERN";
@@ -23,6 +23,7 @@ export interface KnowledgeCard {
   source_date: string;
   provenance: string;
   layer: KnowledgeLayer;
+  relevance_score: number;
 }
 
 export interface KnowledgeSourceRegistration {
@@ -111,7 +112,11 @@ export const SOURCE_REGISTRY: KnowledgeSourceRegistration[] = [
 ];
 
 function cardFromExisting(account: string): KnowledgeCard[] {
-  return retrieveKnowledge(account, 6).map((entry) => ({
+  const haystack = account.toLowerCase();
+  return ALL_KNOWLEDGE.map((entry) => ({
+    entry,
+    score: entry.cues.reduce((score, cue) => score + (haystack.includes(cue) ? (cue.length > 6 ? 3 : 1) : 0), 0),
+  })).filter((row) => row.score > 0).sort((a, b) => b.score - a.score).slice(0, 6).map(({ entry, score }) => ({
     id: `ulika-${entry.id}`,
     name: entry.title,
     aliases: entry.cues.slice(0, 8),
@@ -129,6 +134,7 @@ function cardFromExisting(account: string): KnowledgeCard[] {
     source_date: "2026-08-22",
     provenance: "src/lib/knowledge/retrieve.ts over the repo-owned TypeScript note corpus",
     layer: "ULIKA_CORE",
+    relevance_score: score,
   }));
 }
 
@@ -163,6 +169,7 @@ export function retrieveManualKnowledge(mode: KnowledgeMode, account: string): K
     evidence_strength: card.evidence_strength,
     source_ids: card.source_ids,
     layer: card.layer,
+    relevance_score: card.relevance_score,
   }));
   const json = JSON.stringify(payload).slice(0, 12_000);
   const fence = createHash("sha256").update(account).digest("hex").slice(0, 10);

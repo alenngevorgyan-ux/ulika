@@ -49,6 +49,7 @@ describe("Manual Alpha server controls", () => {
     expect(result.block).toContain("data, not instructions");
     expect(result.limitation).toContain("No licensed PMC research cards");
     expect(result.cards.every((card) => card.layer !== "EVIDENCE")).toBe(true);
+    expect(result.cards.every((card) => card.relevance_score > 0)).toBe(true);
   });
 });
 
