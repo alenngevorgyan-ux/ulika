@@ -629,3 +629,73 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
     return withModel(tamper({ content: BANAL_BASELINE, usage: usage(700, 200, 0.001), latencyMs: 1500 }));
   };
 }
+
+/**
+ * Transport for the advice pipeline: the clarification gate, the existing
+ * stages, and a prose answer from the final adviser.
+ *
+ * Kept separate from fixtureTransport so the older engine tests keep exercising
+ * exactly what they always did.
+ */
+export function adviceTransport(opts: {
+  askQuestions?: boolean;
+  spy?: CompletionRequest[];
+  callCount?: { n: number };
+  shortFinal?: boolean;
+}): Transport {
+  const inner = fixtureTransport({ spy: opts.spy, callCount: opts.callCount });
+  return async (req): Promise<CompletionResult> => {
+    if (req.jsonSchema?.name === "clarification_gate") {
+      opts.spy?.push(req);
+      if (opts.callCount) opts.callCount.n++;
+      const body = opts.askQuestions
+        ? {
+            ready: false,
+            questions: [
+              {
+                question: "Есть ли письменные следы вашего авторства?",
+                options: ["Да, переписка", "Да, коммиты", "Нет"],
+                decisionImpact: "Если следы есть — письменная фиксация; если нет — сначала сбор.",
+              },
+            ],
+          }
+        : { ready: true, questions: [] };
+      return {
+        content: JSON.stringify(body),
+        usage: usage(800, 120, 0.0003),
+        latencyMs: 300,
+        telemetry: {
+          responseId: "gen-clarify", reportedModel: req.modelSlug,
+          selectedProvider: "Google", serviceTier: "default", routingAttempts: [],
+          finishReason: "stop", nativeFinishReason: null,
+        },
+      };
+    }
+    // The adviser: no schema, prose out.
+    if (!req.jsonSchema) {
+      opts.spy?.push(req);
+      if (opts.callCount) opts.callCount.n++;
+      const prose = opts.shortFinal
+        ? "Слишком коротко."
+        : `Ближайшая задача — не «восстановить справедливость», а закрепить авторство до того, как проект уйдёт в отчётность без вашего имени. ` +
+          `Это узкая и достижимая цель, и она обратима: закрепив её, вы ничего не теряете.\n\n` +
+          `Главный ход: письмо руководителю с копией себе, в котором вы не обвиняете, а фиксируете. ` +
+          `Скажите буквально: «Хочу убедиться, что в итоговой документации по проекту отражено, кто делал архитектуру. Могу прислать сводку по коммитам и переписке.»\n\n` +
+          `Скорее всего он ответит уклончиво или сошлётся на занятость. Тогда не спорьте: отправьте ту самую сводку одним письмом, без комментариев.\n\n` +
+          `Порог эскалации — конкретный: если через две недели после письма в документации по-прежнему нет вашего имени, вопрос переходит в HR. ` +
+          `Не «если станет хуже», а именно это событие.\n\n` +
+          `Судя по всему, он закрепляет успех перед правлением, но это вывод, а не факт: вы наблюдали презентацию, а не его мотив.`;
+      return {
+        content: prose,
+        usage: usage(4200, 900, 0.0092),
+        latencyMs: 4000,
+        telemetry: {
+          responseId: "gen-final", reportedModel: req.modelSlug,
+          selectedProvider: "xAI", serviceTier: "default", routingAttempts: [],
+          finishReason: "stop", nativeFinishReason: null,
+        },
+      };
+    }
+    return inner(req);
+  };
+}

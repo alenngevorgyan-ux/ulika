@@ -1,11 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { BudgetExceededError, CostLedger, MODE_CAPS, RESERVATION_SAFETY_MARGIN, type CaseMode } from "./costLedger";
-import { assertCeilingSupported, costOf, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
+import { assertCeilingSupported, costOf, DEFAULT_CONFIGURATION, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
 import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
 import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type Transport } from "./transport";
 import { checkLanguage, resolveLanguage } from "./language";
 import { sanitizeExtract, type SanitationWarning } from "./sanitize";
+import { CLARIFY_SCHEMA, clarifyPrompt, formatAnswers, validateClarify, type ClarifyQuestion } from "./clarify";
+import { buildBrief, renderBrief, type AnalysisBrief } from "./brief";
+import { checkNarrative, finalPrompt, finalUserMessage } from "./finalStrategist";
 import { capFor, ModeNotAvailable, MODES, type AnalysisMode } from "./analysisMode";
 import {
   validateActors,
@@ -130,6 +133,10 @@ export const MAX_OUTPUT_TOKENS = {
   light: 700,
   /** The critic returns a whole revised plan, so it needs the same room. */
   critic: 3000,
+  /** A triage decision and at most five short questions. Not an analysis. */
+  clarify: 800,
+  /** The answer the user reads. Prose, so it needs room to breathe. */
+  final: 2200,
 } as const;
 
 /**
@@ -345,6 +352,59 @@ async function stage(
     if (parsed !== null) return parsed;
   }
   throw new Error(`Stage "${name}" returned no parseable JSON after ${MAX_JSON_RETRIES + 1} attempts.`);
+}
+
+/**
+ * A stage whose output is prose, not JSON.
+ *
+ * Separate from stage() rather than a flag on it, because almost everything
+ * stage() does — schema, parse, retry-on-unparseable — is meaningless here, and
+ * a shared function with half its body switched off invites someone to switch
+ * the wrong half back on. Truncation and accounting still apply identically.
+ */
+async function textStage(
+  transport: Transport,
+  ledger: CostLedger,
+  name: keyof typeof MAX_OUTPUT_TOKENS,
+  spec: ReturnType<typeof modelFor>,
+  system: string,
+  user: string
+): Promise<string> {
+  const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
+  assertCeilingSupported(spec, maxOutputTokens);
+  const attemptId = randomBytes(6).toString("hex");
+  const { projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
+    attemptId,
+    retryNumber: 0,
+  });
+  const result = await transport({
+    modelSlug: spec.slug,
+    system,
+    user,
+    maxOutputTokens,
+    temperature: 0.7,
+    maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+  });
+  ledger.record({
+    stage: name,
+    spec,
+    usage: result.usage,
+    latencyMs: result.latencyMs,
+    telemetry: result.telemetry,
+    attemptId,
+    retryNumber: 0,
+    reservedUsd: projectedUsd,
+  });
+  if (isTruncatedFinish(result.telemetry)) {
+    ledger.onValidation?.({ attemptId, stage: name, result: "truncated" });
+    throw new OutputTruncatedError(
+      name,
+      result.usage.outputTokens,
+      maxOutputTokens,
+      result.telemetry.finishReason ?? result.telemetry.nativeFinishReason
+    );
+  }
+  return result.content.trim();
 }
 
 /**
@@ -808,4 +868,115 @@ export function renderAnalysis(a: CaseAnalysis): string {
   lines.push("", `${L.fallback} ${a.plan.fallbackPlan}`);
   lines.push(`${L.risk}: ${a.plan.risk}. ${L.uncertainty}: ${a.plan.uncertainty}`);
   return lines.join("\n");
+}
+
+/**
+ * The product pipeline: clarify, analyse in private, then advise.
+ *
+ * This replaces "run the analysis and render it" as the shape of the product.
+ * The analysis still happens and is still as strict as it was; what changed is
+ * that it is now STAFF WORK feeding one final adviser, instead of being the
+ * thing handed to the user. See finalStrategist.ts for why.
+ */
+export interface AdviceInput extends CaseInput {
+  analysisMode: AnalysisMode;
+  /** Answers to questions asked on a previous turn, keyed by question id. */
+  answers?: Record<string, string>;
+  /** The questions those answers belong to, echoed back by the client. */
+  askedQuestions?: ClarifyQuestion[];
+  /** The user pressed "continue without clarifying". */
+  skipClarify?: boolean;
+}
+
+export type AdviceOutcome =
+  | { kind: "questions"; questions: ClarifyQuestion[]; ledger: CostLedger }
+  | {
+      kind: "answer";
+      /** The prose the user reads. The only thing the product promises. */
+      answer: string;
+      /** Internal, for the lab and the benchmark. Never rendered to a user. */
+      brief: AnalysisBrief | null;
+      analysis: CaseAnalysis | null;
+      problems: string[];
+      warnings: SanitationWarning[];
+      ledger: CostLedger;
+    };
+
+/** Which internal pipeline each mode buys. Light buys none. */
+const ANALYSIS_CONFIG: Record<AnalysisMode, string | null> = {
+  light: null,
+  standard: "grok-two-call",
+  strong: DEFAULT_CONFIGURATION,
+  deep: null,
+};
+
+export async function runAdvice(input: AdviceInput, transport: Transport): Promise<AdviceOutcome> {
+  const mode = input.analysisMode;
+  if (!MODES[mode].available) throw new ModeNotAvailable(mode);
+
+  const capUsd = capFor(mode);
+  const ledger = input.ledger ?? new CostLedger("standard", capUsd);
+  const sentinel = randomBytes(4).toString("hex");
+  const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
+  const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
+  const answersBlock = formatAnswers(input.askedQuestions ?? [], input.answers ?? {});
+
+  // ---- gate: is anything genuinely missing?
+  // Skipped once answers exist: asking again after the user has answered is the
+  // interrogation loop this gate is meant to prevent.
+  if (!input.skipClarify && !answersBlock) {
+    const clarifySpec = modelFor(resolveConfiguration(DEFAULT_CONFIGURATION), "extract");
+    const raw = await stage(
+      transport,
+      ledger,
+      "clarify",
+      clarifySpec,
+      clarifyPrompt(sentinel, language, jurisdiction),
+      fence("ACCOUNT", input.account, sentinel),
+      CLARIFY_SCHEMA as unknown as { name: string; schema: Record<string, unknown> }
+    );
+    const gate = validateClarify(raw);
+    if (!gate.ready) return { kind: "questions", questions: gate.questions, ledger };
+  }
+
+  // ---- private analysis
+  const configId = ANALYSIS_CONFIG[mode];
+  let analysis: CaseAnalysis | null = null;
+  let brief: AnalysisBrief | null = null;
+  let problems: string[] = [];
+  let warnings: SanitationWarning[] = [];
+
+  if (configId) {
+    const engine = await runCase(
+      {
+        ...input,
+        // Answers are part of the case from here on.
+        account: answersBlock ? `${input.account}\n\nУточнения:\n${answersBlock}` : input.account,
+        configurationId: configId,
+        ledger,
+        preflightCapUsd: capUsd,
+      },
+      transport
+    );
+    analysis = engine.analysis;
+    brief = buildBrief(engine.analysis);
+    problems = engine.problems;
+    warnings = engine.warnings;
+  }
+
+  // ---- the adviser
+  const finalSpec = modelFor(resolveConfiguration(DEFAULT_CONFIGURATION), "strategise");
+  const answer = await textStage(
+    transport,
+    ledger,
+    "final",
+    finalSpec,
+    finalPrompt(sentinel, language, jurisdiction, brief !== null),
+    finalUserMessage(input.account, answersBlock, brief ? renderBrief(brief) : null, sentinel)
+  );
+
+  const narrative = checkNarrative(answer);
+  problems.push(...narrative.problems);
+
+  return { kind: "answer", answer, brief, analysis, problems, warnings, ledger };
 }

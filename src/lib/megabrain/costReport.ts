@@ -32,6 +32,8 @@ export const PROMPT_CHARS = {
   judge: 1200 + 13000, // judge instructions + two full answers
   light: 2200 + 4500, // short prompt + the account
   critic: 3400 + 6000, // critic instructions + the compact plan and facts
+  clarify: 2000 + 4500, // triage instructions + the account
+  final: 3600 + 4500 + 4000, // adviser instructions + the account + the brief
 } as const;
 
 /** Typical output as a fraction of the ceiling. Forecast only, never reserved. */
@@ -69,7 +71,15 @@ export function engineCost(configId?: string): Bound {
   if (cfg.pipeline === "two-stage") {
     return sum([
       call(modelFor(cfg, "extract"), PROMPT_CHARS.extract, MAX_OUTPUT_TOKENS.extract, true),
-      call(modelFor(cfg, "strategise"), PROMPT_CHARS.analyse + PROMPT_CHARS.strategise, MAX_OUTPUT_TOKENS.analyse + MAX_OUTPUT_TOKENS.strategise, true),
+      /**
+       * ONE ceiling, not two summed.
+       *
+       * The merged call runs through stage("strategise", …) and is therefore
+       * bounded by MAX_OUTPUT_TOKENS.strategise alone. Adding the analyse
+       * ceiling on top priced a call that cannot happen, and it was the
+       * difference between Standard fitting its cap and appearing not to.
+       */
+      call(modelFor(cfg, "strategise"), PROMPT_CHARS.analyse + PROMPT_CHARS.strategise, MAX_OUTPUT_TOKENS.strategise, true),
     ]);
   }
   return sum([
@@ -131,12 +141,19 @@ export const scale = (b: Bound, n: number): Bound => ({
 export function modeCost(mode: AnalysisMode, configId?: string): Bound & { available: boolean; capUsd: number; maxModelCalls: number } {
   const cfg = resolveConfiguration(configId);
   const spec = modelFor(cfg, "strategise");
+  /**
+   * Every mode now pays for the two stages the user actually experiences — the
+   * clarification gate and the final adviser — and differs only in how much
+   * private analysis sits between them.
+   */
+  const gate = call(modelFor(cfg, "extract"), PROMPT_CHARS.clarify, MAX_OUTPUT_TOKENS.clarify, true);
+  const adviser = call(spec, PROMPT_CHARS.final, MAX_OUTPUT_TOKENS.final, false);
   const shape =
     mode === "light"
-      ? call(spec, PROMPT_CHARS.light, MAX_OUTPUT_TOKENS.light, false)
+      ? sum([gate, adviser])
       : mode === "strong"
-        ? sum([engineCost(configId), call(spec, PROMPT_CHARS.critic, MAX_OUTPUT_TOKENS.critic, false)])
-        : engineCost(configId);
+        ? sum([gate, engineCost(configId), adviser])
+        : sum([gate, engineCost("grok-two-call"), adviser]);
   const m = MODES[mode];
   return { ...shape, available: m.available, capUsd: m.capUsd, maxModelCalls: m.maxModelCalls };
 }

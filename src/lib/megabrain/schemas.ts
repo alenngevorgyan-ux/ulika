@@ -381,11 +381,6 @@ const strArr = (v: unknown, cap = 20): string[] =>
         .slice(0, cap)
     : [];
 
-const num = (v: unknown, lo: number, hi: number): number | null => {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= lo && n <= hi ? n : null;
-};
-
 export interface ValidationResult<T> {
   ok: boolean;
   value?: T;

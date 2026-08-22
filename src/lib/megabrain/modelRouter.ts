@@ -233,6 +233,29 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
     status: "verified",
   },
 
+  /**
+   * What Standard runs: extraction on the cheap model, then analysis and
+   * strategy merged into one strong call.
+   *
+   * Merged because Standard now spends two of its four calls on the
+   * clarification gate and the final strategist, and three separate internal
+   * stages plus those two do not fit $0.05. The merge is the cheapest thing to
+   * give up: it costs some separation between "what is going on" and "what to
+   * do about it", which the final stage re-does anyway.
+   */
+  "grok-two-call": {
+    id: "grok-two-call",
+    description: "Extraction on the cheap model; analysis and strategy merged into one Grok call.",
+    roles: {
+      extract: "gemini-3.1-flash-lite",
+      analyse: "grok-4.3",
+      strategise: "grok-4.3",
+    },
+    pipeline: "two-stage",
+    baselineModel: "grok-4.3",
+    judgeModel: "grok-4.3",
+    status: "verified",
+  },
   "ablation-two-call": {
     id: "ablation-two-call",
     description:

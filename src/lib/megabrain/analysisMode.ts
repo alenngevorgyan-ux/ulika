@@ -28,7 +28,7 @@ export const MODES: Record<AnalysisMode, ModeSpec> = {
     label: { ru: "Быстро", en: "Quick" },
     capUsd: 0.02,
     // One call. Not a shrunken pipeline — a different, smaller job.
-    maxModelCalls: 1,
+    maxModelCalls: 2,
     available: true,
   },
   standard: {
