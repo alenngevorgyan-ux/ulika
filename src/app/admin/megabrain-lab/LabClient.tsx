@@ -136,7 +136,7 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
           jurisdiction: { country, ...(region.trim() ? { region: region.trim() } : {}) },
           analysisMode: mode,
           ...(Object.keys(answers).length > 0
-            ? { answers, askedQuestions: questions.map((q) => ({ id: q.id, question: q.question, options: q.options.map((label) => ({ label })), decisionImpact: "x" })) }
+            ? { answers, askedQuestions: questions.map((q) => ({ id: q.id, question: q.question, options: q.options.map((label) => ({ label })), decisionImpact: { ifA: "client echo", moveA: "server must replace", ifB: "client echo b", moveB: "server must replace b" } })) }
             : {}),
           ...(skipClarify ? { skipClarify: true } : {}),
           modelChoice,

@@ -27,7 +27,12 @@ export interface ClarifyQuestion {
   /** 2-4 quick options. "Other" is added by the UI, never by the model. */
   options: ClarifyOption[];
   /** Why this changes the decision. Shown to nobody; used to police the bar. */
-  decisionImpact: string;
+  decisionImpact: {
+    ifA: string;
+    moveA: string;
+    ifB: string;
+    moveB: string;
+  };
 }
 
 export interface ClarifyResult {
@@ -62,8 +67,14 @@ export const CLARIFY_SCHEMA = {
               items: { type: "string" },
             },
             decisionImpact: {
-              type: "string",
-              description: "Name the two different moves the two different answers would lead to.",
+              type: "object",
+              additionalProperties: false,
+              required: ["ifA", "moveA", "ifB", "moveB"],
+              properties: {
+                ifA: { type: "string" }, moveA: { type: "string" },
+                ifB: { type: "string" }, moveB: { type: "string" },
+              },
+              description: "Two materially different answers and the different first move each produces.",
             },
           },
         },
@@ -113,7 +124,13 @@ export function validateClarify(raw: unknown): ClarifyResult {
   list.slice(0, MAX_QUESTIONS).forEach((q, i) => {
     const c = (q ?? {}) as Record<string, unknown>;
     const question = typeof c.question === "string" ? c.question.trim() : "";
-    const decisionImpact = typeof c.decisionImpact === "string" ? c.decisionImpact.trim() : "";
+    const impact = (c.decisionImpact ?? {}) as Record<string, unknown>;
+    const decisionImpact = {
+      ifA: typeof impact.ifA === "string" ? impact.ifA.trim() : "",
+      moveA: typeof impact.moveA === "string" ? impact.moveA.trim() : "",
+      ifB: typeof impact.ifB === "string" ? impact.ifB.trim() : "",
+      moveB: typeof impact.moveB === "string" ? impact.moveB.trim() : "",
+    };
     const options = (Array.isArray(c.options) ? c.options : [])
       .filter((x): x is string => typeof x === "string")
       .map((x) => x.trim())
@@ -122,7 +139,9 @@ export function validateClarify(raw: unknown): ClarifyResult {
 
     // A question with no stated decision impact did not pass the bar the prompt
     // set, whatever it says about itself. Dropped rather than shown.
-    if (!question || !decisionImpact || options.length < 2) return;
+    const impactComplete = Object.values(decisionImpact).every((x) => x.length >= 2);
+    const differentMoves = decisionImpact.moveA.toLocaleLowerCase() !== decisionImpact.moveB.toLocaleLowerCase();
+    if (!question || !impactComplete || !differentMoves || options.length < 2) return;
     questions.push({ id: `q${i + 1}`, question, options: options.map((label) => ({ label })), decisionImpact });
   });
 

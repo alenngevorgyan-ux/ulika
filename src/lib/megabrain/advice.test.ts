@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { runAdvice, MAX_OUTPUT_TOKENS } from "./engine";
+import { runAdvice, MAX_OUTPUT_TOKENS, projectAdvicePipeline } from "./engine";
 import { CostLedger } from "./costLedger";
 import { validateClarify, MAX_QUESTIONS, formatAnswers } from "./clarify";
 import { buildBrief } from "./brief";
 import { checkNarrative } from "./finalStrategist";
 import { modeCost } from "./costReport";
 import { MODES } from "./analysisMode";
+import { projectCaseSafety } from "./caseSafety";
 import { GOOD_ANALYSIS, adviceTransport } from "./evals/fixtures";
 import type { CompletionRequest } from "./transport";
 
@@ -38,8 +39,8 @@ describe("the clarification gate asks only when an answer would change the move"
     const r = validateClarify({
       ready: false,
       questions: [
-        { question: "Расскажите подробнее о фоне", options: ["Да", "Нет"], decisionImpact: "" },
-        { question: "Есть ли у вас письменный договор?", options: ["Да", "Нет"], decisionImpact: "Если да — письменная претензия; если нет — сначала фиксация." },
+        { question: "Расскажите подробнее о фоне", options: ["Да", "Нет"], decisionImpact: {} },
+        { question: "Есть ли у вас письменный договор?", options: ["Да", "Нет"], decisionImpact: { ifA: "Есть", moveA: "Письменная претензия", ifB: "Нет", moveB: "Сначала фиксация" } },
       ],
     });
     expect(r.questions).toHaveLength(1);
@@ -48,7 +49,7 @@ describe("the clarification gate asks only when an answer would change the move"
 
   it("treats a reply with no usable question as ready, whatever it claims", () => {
     expect(validateClarify({ ready: false, questions: [] }).ready).toBe(true);
-    expect(validateClarify({ ready: true, questions: [{ question: "q", options: ["a", "b"], decisionImpact: "x" }] }).ready)
+    expect(validateClarify({ ready: true, questions: [{ question: "q", options: ["a", "b"], decisionImpact: { ifA: "answer a", moveA: "move a", ifB: "answer b", moveB: "move b" } }] }).ready)
       .toBe(false);
   });
 
@@ -59,7 +60,7 @@ describe("the clarification gate asks only when an answer would change the move"
         account: ACCOUNT,
         analysisMode: "standard",
         ledger: ledger(),
-        askedQuestions: [{ id: "q1", question: "Есть договор?", options: [{ label: "Да" }], decisionImpact: "x" }],
+        askedQuestions: [{ id: "q1", question: "Есть договор?", options: [{ label: "Да" }], decisionImpact: { ifA: "да", moveA: "проверить договор", ifB: "нет", moveB: "сначала зафиксировать" } }],
         answers: { q1: "Да" },
       },
       adviceTransport({ askQuestions: true, spy })
@@ -129,6 +130,8 @@ describe("the analysis is staff work, not the deliverable", () => {
     expect(b.leverage.length).toBeLessThan(GOOD_ANALYSIS.leverage.points.length);
     // An actor claim marked unknown says nothing usable and does not travel.
     expect(JSON.stringify(b.actors)).not.toContain("unknown");
+    expect(b.recommendation.move).toBe(GOOD_ANALYSIS.plan.recommendedMove);
+    expect(b.recommendation.stopSignals).toEqual(GOOD_ANALYSIS.plan.stopSignals);
   });
 
   it("the adviser prompt offers the brief as a menu, never as a checklist", async () => {
@@ -140,6 +143,10 @@ describe("the analysis is staff work, not the deliverable", () => {
     const final = spy[spy.length - 1];
     expect(final.system).toMatch(/MENU, NOT A CHECKLIST/);
     expect(final.system).toMatch(/not required to mention every hypothesis/);
+    expect(final.system).toMatch(/smallest near-term win/);
+    expect(final.system).toMatch(/face-saving/);
+    expect(final.system).toMatch(/falsified/);
+    expect(final.system).toMatch(/decision density/);
   });
 });
 
@@ -160,15 +167,43 @@ describe("every mode fits its cap under the new shape", () => {
       expect(c.maxModelCalls).toBe(MODES[mode].maxModelCalls);
     }
     // Light is the gate plus the adviser, and nothing else.
-    expect(MODES.light.maxModelCalls).toBe(2);
+    expect(MODES.light.maxModelCalls).toBe(4);
     expect(MAX_OUTPUT_TOKENS.clarify).toBeLessThan(MAX_OUTPUT_TOKENS.final);
+  });
+});
+
+describe("the full user-visible pipeline is preflighted", () => {
+  it("includes clarification, private analysis and final prose before the first call", () => {
+    const account = "Короткая синтетическая ситуация без персональных данных.";
+    const withGate = projectAdvicePipeline({ account, mode: "standard", includeClarify: true });
+    const afterGate = projectAdvicePipeline({ account, mode: "standard", includeClarify: false });
+    expect(withGate).toBeGreaterThan(afterGate);
+    expect(afterGate).toBeGreaterThan(0);
+  });
+
+  it("keeps a typical full turn, including safety, inside each offered cap", () => {
+    const account = "Синтетическое описание ситуации без персональных данных. ".repeat(80);
+    for (const mode of ["light", "standard", "strong"] as const) {
+      const projected = projectCaseSafety(account) + projectAdvicePipeline({ account, mode, includeClarify: true });
+      expect(projected, mode).toBeLessThanOrEqual(MODES[mode].capUsd);
+    }
+  });
+
+  it("refuses before transport when the whole turn cannot fit", async () => {
+    const spy: CompletionRequest[] = [];
+    await expect(runAdvice({
+      account: "Очень длинная ситуация ".repeat(400),
+      analysisMode: "standard",
+      preflightCapUsd: 0.0001,
+    }, adviceTransport({ spy }))).rejects.toThrow(/over the/);
+    expect(spy).toHaveLength(0);
   });
 });
 
 describe("answers become part of the case", () => {
   it("folds them into the account the later stages read", () => {
     const block = formatAnswers(
-      [{ id: "q1", question: "Есть договор?", options: [{ label: "Да" }], decisionImpact: "x" }],
+      [{ id: "q1", question: "Есть договор?", options: [{ label: "Да" }], decisionImpact: { ifA: "да", moveA: "проверить договор", ifB: "нет", moveB: "сначала зафиксировать" } }],
       { q1: "Да, подписан в марте" }
     );
     expect(block).toContain("Есть договор?");

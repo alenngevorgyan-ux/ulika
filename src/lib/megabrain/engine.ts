@@ -260,6 +260,76 @@ export function projectCasePipeline(p: {
   return { perStage, totalUsd: perStage.reduce((n, x) => n + x.usd, 0) };
 }
 
+/**
+ * Conservative preflight for the whole user-visible advice turn.
+ *
+ * Unlike projectCasePipeline this includes the intake gate and the prose the
+ * user actually receives. Callers continuing an existing flow set
+ * includeClarify=false and pass only the budget that remains after intake.
+ */
+export function projectAdvicePipeline(input: {
+  account: string;
+  mode: AnalysisMode;
+  responseLanguage?: ResponseLanguage;
+  jurisdiction?: Jurisdiction;
+  includeClarify: boolean;
+}): number {
+  const sentinel = "preflight";
+  const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
+  const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
+  const defaultConfig = resolveConfiguration(DEFAULT_CONFIGURATION);
+  const reserve = (spec: ReturnType<typeof modelFor>, text: string, out: number) =>
+    costOf(spec, estimateTokens(text), out) * RESERVATION_SAFETY_MARGIN;
+
+  let total = 0;
+  if (input.includeClarify) {
+    total += reserve(
+      modelFor(defaultConfig, "extract"),
+      clarifyPrompt(sentinel, language, jurisdiction) + fence("ACCOUNT", input.account, sentinel),
+      MAX_OUTPUT_TOKENS.clarify
+    );
+  }
+
+  if (input.mode !== "light") {
+    const config = resolveConfiguration(ANALYSIS_CONFIG[input.mode]!);
+    total += projectCasePipeline({
+      account: input.account,
+      systems: {
+        extract: extractPrompt(sentinel, language, jurisdiction),
+        analyse: analysePrompt(sentinel, language, jurisdiction),
+        strategise:
+          config.pipeline === "two-stage"
+            ? combinedPrompt(sentinel, language, jurisdiction)
+            : strategisePrompt(sentinel, language, jurisdiction),
+      },
+      specs: {
+        extract: modelFor(config, "extract"),
+        analyse: modelFor(config, "analyse"),
+        strategise: modelFor(config, "strategise"),
+      },
+      pipeline: config.pipeline === "two-stage" ? "two-stage" : "three-stage",
+    }).totalUsd;
+
+    if (input.mode === "strong") {
+      // The critic sees compact structured staff work, not the raw transcript.
+      // Six thousand tokens is deliberately above the measured prompt used by
+      // the existing critic cost report.
+      const criticSpec = modelFor(config, "strategise");
+      total += costOf(criticSpec, 6_000, MAX_OUTPUT_TOKENS.critic) * RESERVATION_SAFETY_MARGIN;
+    }
+  }
+
+  // The brief is a deterministic projection of selected fields, not a copy of
+  // every upstream token. Use a deliberately padded measured bound: Standard
+  // briefs are ~4k characters, Strong may carry the separate analysis pass.
+  const briefChars = input.mode === "light" ? 0 : input.mode === "strong" ? 9_000 : 6_000;
+  const finalText =
+    finalPrompt(sentinel, language, jurisdiction, input.mode !== "light") +
+    finalUserMessage(input.account, "", "x".repeat(briefChars), sentinel);
+  total += reserve(modelFor(defaultConfig, "strategise"), finalText, MAX_OUTPUT_TOKENS.final);
+  return total;
+}
+
 /** The cheapest available mode whose cap covers this projection, if any. */
 function modeThatWouldFit(projectedUsd: number, current: string): string | null {
   const fits = (Object.values(MODES) as { id: string; capUsd: number; available: boolean }[])
@@ -789,11 +859,18 @@ export async function runStrong(
       problems.push(...check.problems.map((p) => `critic.rejected:${p}`));
     }
   } catch (e) {
-    if (e instanceof BudgetExceededError) {
-      problems.push("critic.skipped:budget");
-    } else {
-      throw e;
-    }
+    // The critic is optional by contract. Its transport, accounting or schema
+    // failure must not destroy the valid plan already bought above. Keep only a
+    // fixed code; exception prose may contain provider-controlled text.
+    const name = e instanceof Error ? e.name : "Error";
+    const reason = e instanceof BudgetExceededError
+      ? "budget"
+      : name === "ProviderHttpError"
+        ? "provider"
+        : name === "AccountingError"
+          ? "accounting"
+          : "invalid";
+    problems.push(`critic.skipped:${reason}`);
   }
 
   return { ...base, analysis: { ...base.analysis, plan: revised }, ledger, problems };
@@ -922,6 +999,18 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
   const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
   const answersBlock = formatAnswers(input.askedQuestions ?? [], input.answers ?? {});
 
+  const projected = projectAdvicePipeline({
+    account: answersBlock ? `${input.account}\n\nУточнения:\n${answersBlock}` : input.account,
+    mode,
+    responseLanguage: input.responseLanguage,
+    jurisdiction,
+    includeClarify: !input.skipClarify && !answersBlock,
+  });
+  const preflightCap = input.preflightCapUsd ?? capUsd;
+  if (projected > preflightCap) {
+    throw new CaseTooComplexError(mode, projected, preflightCap, modeThatWouldFit(projected, mode));
+  }
+
   // ---- gate: is anything genuinely missing?
   // Skipped once answers exist: asking again after the user has answered is the
   // interrogation loop this gate is meant to prevent.
@@ -948,14 +1037,22 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
   let warnings: SanitationWarning[] = [];
 
   if (configId) {
-    const engine = await runCase(
+    const caseInput = {
+      ...input,
+      // Answers are part of the case from here on.
+      account: answersBlock ? `${input.account}\n\nУточнения:\n${answersBlock}` : input.account,
+      configurationId: configId,
+      ledger,
+      // The whole-turn preflight above owns complexity refusal. The nested
+      // engine still has the same ledger guard but must not re-label the
+      // remaining envelope as a different statement about case complexity.
+      preflightCapUsd: capUsd,
+    };
+    const engine = mode === "strong"
+      ? await runStrong(caseInput, transport)
+      : await runCase(
       {
-        ...input,
-        // Answers are part of the case from here on.
-        account: answersBlock ? `${input.account}\n\nУточнения:\n${answersBlock}` : input.account,
-        configurationId: configId,
-        ledger,
-        preflightCapUsd: capUsd,
+        ...caseInput,
       },
       transport
     );

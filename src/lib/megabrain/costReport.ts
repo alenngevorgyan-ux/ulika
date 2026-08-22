@@ -2,6 +2,7 @@ import { costOf, modelFor, resolveConfiguration, MODELS, type ModelSpec } from "
 import { MAX_OUTPUT_TOKENS } from "./engine";
 import { MODE_CAPS, RESERVATION_SAFETY_MARGIN } from "./costLedger";
 import { MODES, type AnalysisMode } from "./analysisMode";
+import { CASE_SAFETY_MAX_OUTPUT_TOKENS } from "./caseSafety";
 
 /**
  * The single canonical cost calculation.
@@ -34,6 +35,7 @@ export const PROMPT_CHARS = {
   critic: 3400 + 6000, // critic instructions + the compact plan and facts
   clarify: 2000 + 4500, // triage instructions + the account
   final: 3600 + 4500 + 4000, // adviser instructions + the account + the brief
+  safety: 900 + 4500, // narrow classifier + the account
 } as const;
 
 /** Typical output as a fraction of the ceiling. Forecast only, never reserved. */
@@ -147,13 +149,15 @@ export function modeCost(mode: AnalysisMode, configId?: string): Bound & { avail
    * private analysis sits between them.
    */
   const gate = call(modelFor(cfg, "extract"), PROMPT_CHARS.clarify, MAX_OUTPUT_TOKENS.clarify, true);
+  const safety = call(modelFor(cfg, "extract"), PROMPT_CHARS.safety, CASE_SAFETY_MAX_OUTPUT_TOKENS, false);
   const adviser = call(spec, PROMPT_CHARS.final, MAX_OUTPUT_TOKENS.final, false);
+  const critic = call(spec, PROMPT_CHARS.critic, MAX_OUTPUT_TOKENS.critic, false);
   const shape =
     mode === "light"
-      ? sum([gate, adviser])
+      ? sum([safety, gate, adviser])
       : mode === "strong"
-        ? sum([gate, engineCost(configId), adviser])
-        : sum([gate, engineCost("grok-two-call"), adviser]);
+        ? sum([safety, gate, engineCost(configId), critic, adviser])
+        : sum([safety, gate, engineCost("grok-two-call"), adviser]);
   const m = MODES[mode];
   return { ...shape, available: m.available, capUsd: m.capUsd, maxModelCalls: m.maxModelCalls };
 }

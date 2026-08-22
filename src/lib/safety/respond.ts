@@ -29,6 +29,12 @@ const FALLBACK: Record<CrisisType, string> = {
     "I want to be straight with you rather than keep going as if this were an everyday problem. What you're describing deserves someone qualified, and that's not me. How are you doing right this minute?",
 };
 
+/** Deterministic handoff for paths that must not buy a second model call. */
+export function buildStaticCrisisReply(type: CrisisType): string {
+  const set = RESOURCES[type];
+  return [FALLBACK[type], "", HANDOFF_NOTE, "", set.heading, ...set.lines].join("\n");
+}
+
 /**
  * Build the crisis reply.
  *

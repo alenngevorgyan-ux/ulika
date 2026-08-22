@@ -38,6 +38,16 @@ export interface AnalysisBrief {
   leverage: { kind: string; description: string; risk: string; reversibility: string }[];
   /** Candidate moves, with what the other side is expected to do. */
   moves: { kind: string; summary: string; risk: string; reversible: boolean; countermove?: string }[];
+  /** The staff's recommendation. The final strategist may edit, not ignore, it. */
+  recommendation: {
+    conclusion: string;
+    move: string;
+    exactWords: { role: string; text: string; useWhen: string; doNotUseWhen: string }[];
+    branches: { if: string; then: string; stopCondition: string }[];
+    stopSignals: string[];
+    fallback: string;
+    uncertainty: string;
+  };
   riskNotes: string[];
 }
 
@@ -81,6 +91,24 @@ export function buildBrief(a: CaseAnalysis): AnalysisBrief {
       reversible: s.reversible,
       ...(counterFor(s.kind) ? { countermove: counterFor(s.kind) } : {}),
     })),
+    recommendation: {
+      conclusion: a.plan.conclusion,
+      move: a.plan.recommendedMove,
+      exactWords: a.plan.exactWords.map((p) => ({
+        role: p.role,
+        text: p.text,
+        useWhen: p.useWhen,
+        doNotUseWhen: p.doNotUseWhen,
+      })),
+      branches: a.plan.ifThenBranches.map((b) => ({
+        if: b.if,
+        then: b.then,
+        stopCondition: b.stopCondition,
+      })),
+      stopSignals: a.plan.stopSignals,
+      fallback: a.plan.fallbackPlan,
+      uncertainty: a.plan.uncertainty,
+    },
     riskNotes: [
       a.plan.riskAssessment.legalUncertainty,
       `Канал: ${a.plan.riskAssessment.proceduralChannel}`,

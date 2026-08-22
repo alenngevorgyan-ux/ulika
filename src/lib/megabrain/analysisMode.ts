@@ -28,23 +28,24 @@ export const MODES: Record<AnalysisMode, ModeSpec> = {
     label: { ru: "Быстро", en: "Quick" },
     capUsd: 0.02,
     // One call. Not a shrunken pipeline — a different, smaller job.
-    maxModelCalls: 2,
+    // Safety + clarification (one JSON retry) + final prose.
+    maxModelCalls: 4,
     available: true,
   },
   standard: {
     id: "standard",
     label: { ru: "Разобрать", en: "Analyse" },
     capUsd: 0.05,
-    // extract, analyse, strategise, plus one permitted JSON retry.
-    maxModelCalls: 4,
+    // Safety + clarify + extract + merged analysis (one retry each) + final.
+    maxModelCalls: 8,
     available: true,
   },
   strong: {
     id: "strong",
     label: { ru: "Сильный ход", en: "Strong move" },
     capUsd: 0.1,
-    // Standard plus ONE bounded critic/revision pass. No loop.
-    maxModelCalls: 5,
+    // Safety + clarify + three private stages (one retry each) + critic + final.
+    maxModelCalls: 11,
     available: true,
   },
   deep: {
