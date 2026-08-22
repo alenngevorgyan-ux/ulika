@@ -179,7 +179,11 @@ export const ANALYSE_SCHEMA = {
           claim: { type: "string" },
           evidenceFor: strings(""),
           evidenceAgainst: strings(""),
-          confidence: { type: "number", minimum: 0, maximum: 100 },
+          confidence: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "A band. Never a percentage — the percentages were invented.",
+          },
           discriminatingTest: {
             type: "string",
             description: "A cheap, reversible observation separating this from the others.",

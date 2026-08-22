@@ -131,7 +131,15 @@ export interface Hypothesis {
   evidenceFor: string[];
   evidenceAgainst: string[];
   /** 0-100. Must sum to something sane across the set; checked below. */
-  confidence: number;
+  /**
+   * A band, not a percentage.
+   *
+   * The numbers were invented. A model asked for 0-100 produces 65, 45 and 30
+   * because three numbers were requested, not because it measured anything —
+   * and shown to a user they read as arithmetic. Internal now, and optional:
+   * absent is a truthful answer when nothing supports a ranking.
+   */
+  confidence?: ConfidenceBand;
   /**
    * The cheap, reversible observation that would separate this hypothesis from
    * the others. A hypothesis with no discriminating test is a mood.
@@ -537,6 +545,22 @@ export function validateActors(raw: unknown, frame?: CaseFrame): ValidationResul
   return { ok: problems.length === 0, value: { actors }, problems };
 }
 
+export const CONFIDENCE_BANDS = ["low", "medium", "high"] as const;
+export type ConfidenceBand = (typeof CONFIDENCE_BANDS)[number];
+
+/** Accepts a band, or a legacy 0-100 number mapped onto one. Never invents one. */
+export function readConfidence(raw: unknown): ConfidenceBand | undefined {
+  const band = CONFIDENCE_BANDS.find((b) => b === raw);
+  if (band) return band;
+  // Only a number that was a valid percentage maps onto a band. 140 is not a
+  // confident 100, it is a number that means nothing, and quietly promoting it
+  // to "high" would manufacture the certainty this change exists to remove.
+  if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 100) {
+    return raw >= 67 ? "high" : raw >= 34 ? "medium" : "low";
+  }
+  return undefined;
+}
+
 /** Three competing hypotheses is the floor, and it is a hard floor. */
 export const MIN_HYPOTHESES = 3;
 
@@ -549,17 +573,17 @@ export function validateHypotheses(raw: unknown): ValidationResult<HypothesisSet
   list.slice(0, 8).forEach((h, i) => {
     const o = (h ?? {}) as Record<string, unknown>;
     const claim = str(o.claim, 500);
-    const confidence = num(o.confidence, 0, 100);
+    const confidence = readConfidence(o.confidence);
     const discriminatingTest = str(o.discriminatingTest, 800);
     if (!claim) problems.push(`hypotheses[${i}].claim`);
-    if (confidence === null) problems.push(`hypotheses[${i}].confidence`);
+    // No longer required. A missing band is honest; an invented number is not.
     if (!discriminatingTest) problems.push(`hypotheses[${i}].discriminatingTest`);
-    if (claim && confidence !== null && discriminatingTest) {
+    if (claim && discriminatingTest) {
       hypotheses.push({
         claim,
         evidenceFor: strArr(o.evidenceFor),
         evidenceAgainst: strArr(o.evidenceAgainst),
-        confidence,
+        ...(confidence ? { confidence } : {}),
         discriminatingTest,
       });
     }

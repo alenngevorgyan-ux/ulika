@@ -41,9 +41,18 @@ describe("validators refuse degraded model output", () => {
     expect(validateHypotheses(one).problems).toContain("hypotheses.tooFew");
     expect(MIN_HYPOTHESES).toBe(3);
   });
-  it("rejects a confidence outside 0-100 rather than clamping it", () => {
-    const r = validateHypotheses({ hypotheses: [{ claim: "x", confidence: 140, discriminatingTest: "t" }] });
-    expect(r.problems.some((p) => p.includes("confidence"))).toBe(true);
+  it("takes a confidence band, drops anything that is not one, and requires none", () => {
+    // Percentages are gone: a model asked for 0-100 produces numbers because
+    // numbers were requested, not because it measured anything.
+    const good = validateHypotheses({ hypotheses: [{ claim: "x", confidence: "high", discriminatingTest: "t" }] });
+    expect(good.value!.hypotheses[0].confidence).toBe("high");
+    const junk = validateHypotheses({ hypotheses: [{ claim: "x", confidence: 140, discriminatingTest: "t" }] });
+    // 140 is not a band and carries no meaning; the hypothesis survives without one.
+    expect(junk.value!.hypotheses[0].confidence).toBeUndefined();
+    expect(junk.problems.some((p) => p.includes("confidence"))).toBe(false);
+    // A legacy number in range still maps onto a band rather than being lost.
+    const legacy = validateHypotheses({ hypotheses: [{ claim: "x", confidence: 70, discriminatingTest: "t" }] });
+    expect(legacy.value!.hypotheses[0].confidence).toBe("high");
   });
   it("rejects a plan with no verbatim words — the part users judge", () => {
     expect(validatePlan({ conclusion: "c", recommendedMove: "m", risk: "green", uncertainty: "u" }).problems)

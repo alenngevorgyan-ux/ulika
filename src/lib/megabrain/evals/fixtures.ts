@@ -95,21 +95,21 @@ export const GOOD_ANALYSIS: CaseAnalysis = {
         claim: "Присвоение результата ради позиции перед правлением.",
         evidenceFor: ["Ни одного упоминания на презентации"],
         evidenceAgainst: ["Формат мог не предполагать имён"],
-        confidence: 45,
+        confidence: "medium",
         discriminatingTest: "Спросить письменно, как будет оформлено авторство в квартальном отчёте.",
       },
       {
         claim: "Пользователя готовят к другой роли, и «разгрузим» — не наказание.",
         evidenceFor: ["Формулировка про следующий квартал"],
         evidenceAgainst: ["Сокращение числа встреч"],
-        confidence: 25,
+        confidence: "low",
         discriminatingTest: "Попросить письменно зафиксировать цели на квартал.",
       },
       {
         claim: "Версия пользователя неполна: решение принималось выше руководителя.",
         evidenceFor: ["Пользователь не знает, что говорилось на правлении"],
         evidenceAgainst: ["Изменения начались сразу после презентации"],
-        confidence: 30,
+        confidence: "low",
         discriminatingTest: "Уточнить у смежного участника, обсуждалась ли команда на правлении.",
       },
     ],
@@ -237,9 +237,9 @@ export const GOOD_ANALYSIS_EN: CaseAnalysis = {
   },
   hypotheses: {
     hypotheses: [
-      { claim: "Credit was appropriated to strengthen the manager's standing with the board.", evidenceFor: ["No mention at the presentation"], evidenceAgainst: ["The format may not have called for names"], confidence: 45, discriminatingTest: "Ask in writing how authorship will be recorded in the quarterly report." },
-      { claim: "The user is being moved to another role and 'unloading' is not a punishment.", evidenceFor: ["The wording about next quarter"], evidenceAgainst: ["Fewer meeting invitations"], confidence: 25, discriminatingTest: "Ask for the quarterly goals to be recorded in writing." },
-      { claim: "The user's account is incomplete: the decision was made above the manager.", evidenceFor: ["The user does not know what was said at the board"], evidenceAgainst: ["Changes began right after the presentation"], confidence: 30, discriminatingTest: "Ask an adjacent participant whether the team was discussed at the board." },
+      { claim: "Credit was appropriated to strengthen the manager's standing with the board.", evidenceFor: ["No mention at the presentation"], evidenceAgainst: ["The format may not have called for names"], confidence: "medium", discriminatingTest: "Ask in writing how authorship will be recorded in the quarterly report." },
+      { claim: "The user is being moved to another role and 'unloading' is not a punishment.", evidenceFor: ["The wording about next quarter"], evidenceAgainst: ["Fewer meeting invitations"], confidence: "low", discriminatingTest: "Ask for the quarterly goals to be recorded in writing." },
+      { claim: "The user's account is incomplete: the decision was made above the manager.", evidenceFor: ["The user does not know what was said at the board"], evidenceAgainst: ["Changes began right after the presentation"], confidence: "low", discriminatingTest: "Ask an adjacent participant whether the team was discussed at the board." },
     ],
   },
   leverage: {
