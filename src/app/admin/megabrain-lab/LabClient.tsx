@@ -89,10 +89,17 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
   const [mode, setMode] = useState("standard");
   const [modelChoice, setModelChoice] = useState("auto");
   const [running, setRunning] = useState(false);
+  // The gate's questions, and what the user picked for each.
+  const [questions, setQuestions] = useState<{ id: string; question: string; options: string[] }[]>([]);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [followUpBusy, setFollowUpBusy] = useState<string | null>(null);
   // The whole safe payload, not a string. The previous version kept only a
   // message and dropped `kind` — the one field that named the failure.
   const [error, setError] = useState<Diagnostics | null>(null);
   const [result, setResult] = useState<{
+    /** What the product actually delivers. Everything else below is debug. */
+    answer: string;
+    brief: unknown;
     rendered: string | null;
     light: Record<string, string> | null;
     cost: { reportedSpendUsd: number; budgetedSpendUsd: number; capUsd: number; latencyMs: number; hasUnknownCharges: boolean };
@@ -107,7 +114,7 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
 
   const selected = modes.find((m) => m.id === mode)!;
 
-  async function run() {
+  async function run(skipClarify = false) {
     if (inFlight.current || !selected.available) return;
     inFlight.current = true;
     setRunning(true);
@@ -128,6 +135,10 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
           responseLanguage: language,
           jurisdiction: { country, ...(region.trim() ? { region: region.trim() } : {}) },
           analysisMode: mode,
+          ...(Object.keys(answers).length > 0
+            ? { answers, askedQuestions: questions.map((q) => ({ id: q.id, question: q.question, options: q.options.map((label) => ({ label })), decisionImpact: "x" })) }
+            : {}),
+          ...(skipClarify ? { skipClarify: true } : {}),
           modelChoice,
         }),
       });
@@ -141,7 +152,12 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
             ? (data as Diagnostics)
             : localFailure(String(data.error ?? res.status), String(data.detail ?? "Запрос отклонён до запуска движка."))
         );
+      } else if (data.kind === "questions") {
+        // Nothing past the gate ran; the user answers and presses Run again.
+        setQuestions(data.questions);
+        setAnswers({});
       } else {
+        setQuestions([]);
         setResult(data);
       }
     } catch (e) {
@@ -158,6 +174,44 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
       setRunning(false);
     }
   }
+
+  /** One extra turn on the answer already given. Action ids only. */
+  async function followUp(action: string, label: string) {
+    if (inFlight.current || !result) return;
+    inFlight.current = true;
+    setFollowUpBusy(label);
+    try {
+      const res = await fetch("/api/megabrain-lab", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account,
+          analysisMode: mode,
+          responseLanguage: language,
+          jurisdiction: { country, ...(region.trim() ? { region: region.trim() } : {}) },
+          followUp: { action, previousAnswer: result.answer },
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.answer) {
+        // Appended, not replaced: the follow-up is a continuation of the same
+        // conversation, and losing the original answer to read the reply to it
+        // would be a strange thing to do to somebody.
+        setResult({ ...result, answer: `${result.answer}\n\n— — —\n\n**${label}**\n\n${data.answer}` });
+      }
+    } finally {
+      inFlight.current = false;
+      setFollowUpBusy(null);
+    }
+  }
+
+  const FOLLOW_UPS: { id: string; label: string }[] = [
+    { id: "why", label: "Почему именно так?" },
+    { id: "stronger", label: "Дай более сильный ход" },
+    { id: "other_side", label: "Что ответит другая сторона?" },
+    { id: "draft_message", label: "Составь сообщение" },
+    { id: "what_we_got_wrong", label: "Что мы могли понять неправильно?" },
+  ];
 
   return (
     <main className="max-w-3xl mx-auto p-6 space-y-6">
@@ -237,12 +291,53 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
       </details>
 
       <button
-        onClick={run}
+        onClick={() => run()}
         disabled={running || account.trim().length < 20 || !selected.available}
         className="px-4 py-2 rounded-md bg-accent text-black disabled:opacity-40"
       >
         {running ? "Считаю…" : `Запустить (${selected.label.ru})`}
       </button>
+
+      {questions.length > 0 && (
+        <section className="space-y-3 rounded-md border border-panel-border p-4">
+          <p className="text-sm">
+            Чтобы ответ был практичным, нужно уточнить {questions.length === 1 ? "одно" : questions.length}:
+          </p>
+          {questions.map((q) => (
+            <div key={q.id} className="space-y-1">
+              <div className="text-sm">{q.question}</div>
+              <div className="flex flex-wrap gap-2">
+                {q.options.map((o) => (
+                  <button
+                    key={o}
+                    onClick={() => setAnswers({ ...answers, [q.id]: o })}
+                    className={`text-xs px-2 py-1 rounded-md border ${
+                      answers[q.id] === o ? "border-accent" : "border-panel-border"
+                    }`}
+                  >
+                    {o}
+                  </button>
+                ))}
+              </div>
+              {/* "Other" is the interface's, never the model's. */}
+              <input
+                value={q.options.includes(answers[q.id] ?? "") ? "" : answers[q.id] ?? ""}
+                onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                placeholder="Другое…"
+                className="w-full bg-panel border border-panel-border rounded-md p-2 text-sm"
+              />
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <button onClick={() => run()} disabled={running} className="px-3 py-2 rounded-md bg-accent text-black text-sm disabled:opacity-40">
+              {running ? "Считаю…" : "Ответить и продолжить"}
+            </button>
+            <button onClick={() => run(true)} disabled={running} className="px-3 py-2 rounded-md border border-panel-border text-sm disabled:opacity-40">
+              Продолжить без уточнений
+            </button>
+          </div>
+        </section>
+      )}
 
       {error && (
         <section
@@ -307,6 +402,22 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
 
       {result && (
         <section className="space-y-4">
+          {/* The deliverable. Everything below it is admin debug. */}
+          <article className="whitespace-pre-wrap leading-relaxed">{result.answer}</article>
+
+          <div className="flex flex-wrap gap-2">
+            {FOLLOW_UPS.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => followUp(f.id, f.label)}
+                disabled={followUpBusy !== null}
+                className="text-xs px-2 py-1 rounded-md border border-panel-border disabled:opacity-40"
+              >
+                {followUpBusy === f.label ? "…" : f.label}
+              </button>
+            ))}
+          </div>
+
           {result.warnings?.length > 0 && (
             <details className="text-xs rounded-md border border-panel-border p-2">
               <summary className="cursor-pointer">
@@ -325,6 +436,11 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
             ${result.cost.reportedSpendUsd.toFixed(4)} из ${result.cost.capUsd.toFixed(2)} · {(result.cost.latencyMs / 1000).toFixed(1)} с
             {result.cost.hasUnknownCharges && " · есть неоценённые вызовы"}
           </div>
+          <details className="text-xs">
+            <summary className="cursor-pointer text-muted">Внутренняя структура (debug)</summary>
+            <pre className="whitespace-pre-wrap mt-2">{result.rendered ?? "— Light не строит анализ —"}</pre>
+          </details>
+
           <table className="w-full text-xs">
             <tbody>
               {result.calls.map((c, i) => (

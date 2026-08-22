@@ -9,6 +9,7 @@ import { sanitizeExtract, type SanitationWarning } from "./sanitize";
 import { CLARIFY_SCHEMA, clarifyPrompt, formatAnswers, validateClarify, type ClarifyQuestion } from "./clarify";
 import { buildBrief, renderBrief, type AnalysisBrief } from "./brief";
 import { checkNarrative, finalPrompt, finalUserMessage } from "./finalStrategist";
+import { followUpPrompt, followUpUserMessage, type FollowUpAction } from "./followUp";
 import { capFor, ModeNotAvailable, MODES, type AnalysisMode } from "./analysisMode";
 import {
   validateActors,
@@ -979,4 +980,39 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
   problems.push(...narrative.problems);
 
   return { kind: "answer", answer, brief, analysis, problems, warnings, ledger };
+}
+
+/**
+ * One follow-up turn on an answer already given.
+ *
+ * Its own small budget: a follow-up is one call and must never be able to spend
+ * a whole case's worth of money because somebody clicked twice.
+ */
+export async function runFollowUp(
+  input: {
+    account: string;
+    previousAnswer: string;
+    action: FollowUpAction;
+    excerpt?: string;
+    responseLanguage?: ResponseLanguage;
+    jurisdiction?: Jurisdiction;
+    ledger?: CostLedger;
+  },
+  transport: Transport
+): Promise<{ answer: string; ledger: CostLedger }> {
+  const ledger = input.ledger ?? new CostLedger("quick", MODES.light.capUsd);
+  const sentinel = randomBytes(4).toString("hex");
+  const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
+  const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
+  const spec = modelFor(resolveConfiguration(DEFAULT_CONFIGURATION), "strategise");
+
+  const answer = await textStage(
+    transport,
+    ledger,
+    "final",
+    spec,
+    followUpPrompt(input.action, sentinel, language, jurisdiction),
+    followUpUserMessage(input.account, input.previousAnswer, input.excerpt ?? null, sentinel)
+  );
+  return { answer, ledger };
 }

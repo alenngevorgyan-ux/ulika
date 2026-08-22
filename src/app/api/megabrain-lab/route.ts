@@ -7,12 +7,40 @@ import { capFor, MODES, ModeNotAvailable, type AnalysisMode } from "@/lib/megabr
 import { CostLedger } from "@/lib/megabrain/costLedger";
 import { RunRecorder, describeFailure } from "@/lib/megabrain/runRecorder";
 import { buildDiagnostics } from "@/lib/megabrain/labDiagnostics";
-import { runAnalysis, renderAnalysis, CaseTooComplexError } from "@/lib/megabrain/engine";
+import { runAdvice, runFollowUp, renderAnalysis, CaseTooComplexError } from "@/lib/megabrain/engine";
+import { isFollowUpAction } from "@/lib/megabrain/followUp";
+import type { ClarifyQuestion } from "@/lib/megabrain/clarify";
 import { createOpenRouterTransport } from "@/lib/megabrain/transport";
 import { resolveConfiguration, DEFAULT_CONFIGURATION } from "@/lib/megabrain/modelRouter";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
+
+/** Allowlisted cost summary. Same fields the diagnostics path already exposes. */
+function costOf(ledger: CostLedger) {
+  return {
+    reportedSpendUsd: ledger.reportedSpendUsd,
+    budgetedSpendUsd: ledger.budgetedSpendUsd,
+    hasUnknownCharges: ledger.hasUnknownCharges,
+    capUsd: ledger.capUsd,
+    latencyMs: ledger.allDeep().reduce((n, e) => n + e.latencyMs, 0),
+  };
+}
+
+function callsOf(ledger: CostLedger) {
+  return ledger.allDeep().map((e) => ({
+    stage: e.stage,
+    model: e.model,
+    reportedModel: e.reportedModel,
+    provider: e.selectedProvider,
+    inputTokens: e.inputTokens,
+    outputTokens: e.outputTokens,
+    actualCostUsd: e.actualCostUsd,
+    latencyMs: e.latencyMs,
+    finishReason: e.finishReason,
+    retryNumber: e.retryNumber,
+  }));
+}
 
 /**
  * The lab's server route. Admin-only, flag-gated, and the only place the key
@@ -43,6 +71,12 @@ export async function POST(req: NextRequest) {
     jurisdiction?: Jurisdiction;
     analysisMode?: AnalysisMode;
     modelChoice?: string;
+    /** Answers to questions asked on the previous turn. */
+    answers?: Record<string, string>;
+    askedQuestions?: ClarifyQuestion[];
+    skipClarify?: boolean;
+    /** Follow-up turn on an answer already given. */
+    followUp?: { action?: string; previousAnswer?: string; excerpt?: string };
   };
   try {
     body = await req.json();
@@ -116,45 +150,92 @@ export async function POST(req: NextRequest) {
       journal.onValidation(v);
     };
 
-    const result = await runAnalysis(
+    const transport = createOpenRouterTransport(key);
+    const language = body.responseLanguage ?? "auto";
+    const jurisdiction = body.jurisdiction ?? { country: "unknown" as const };
+
+    /**
+     * A follow-up is its own short turn on an answer already given. The action
+     * is an id from a server-held allowlist — nothing the browser sends becomes
+     * an instruction.
+     */
+    if (body.followUp) {
+      const action = body.followUp.action;
+      const previousAnswer = String(body.followUp.previousAnswer ?? "").slice(0, 20_000);
+      if (!isFollowUpAction(action) || previousAnswer.trim().length < 50) {
+        return NextResponse.json({ error: "BAD_REQUEST" }, { status: 400 });
+      }
+      const followUp = await runFollowUp(
+        {
+          account,
+          previousAnswer,
+          action,
+          excerpt: String(body.followUp.excerpt ?? "").slice(0, 4_000) || undefined,
+          responseLanguage: language,
+          jurisdiction,
+          ledger,
+        },
+        transport
+      );
+      recorder.finish("complete", undefined, { reportedSpendUsd: ledger.reportedSpendUsd });
+      return NextResponse.json({
+        kind: "answer",
+        answer: followUp.answer,
+        rendered: null,
+        analysis: null,
+        brief: null,
+        problems: [],
+        warnings: [],
+        cost: costOf(ledger),
+        calls: callsOf(ledger),
+      });
+    }
+
+    const result = await runAdvice(
       {
         account,
         analysisMode: mode,
-        responseLanguage: body.responseLanguage ?? "auto",
-        jurisdiction: body.jurisdiction ?? { country: "unknown" },
+        responseLanguage: language,
+        jurisdiction,
         configurationId: configuration.id === "lab-override" ? DEFAULT_CONFIGURATION : configuration.id,
         ledger,
-        // The product's cap for this tier, so an oversized case is refused at
-        // the door instead of after extract has been billed.
         preflightCapUsd: capUsd,
+        answers: body.answers,
+        askedQuestions: body.askedQuestions,
+        skipClarify: body.skipClarify === true,
       },
-      createOpenRouterTransport(key)
+      transport
     );
 
-    const entries = ledger.allDeep();
-    const calls = entries.map((e) => ({
-      stage: e.stage,
-      model: e.model,
-      reportedModel: e.reportedModel,
-      provider: e.selectedProvider,
-      inputTokens: e.inputTokens,
-      outputTokens: e.outputTokens,
-      actualCostUsd: e.actualCostUsd,
-      latencyMs: e.latencyMs,
-      finishReason: e.finishReason,
-      retryNumber: e.retryNumber,
-    }));
+    // The gate asked something. Nothing past it ran, and nothing more is spent.
+    if (result.kind === "questions") {
+      recorder.finish("complete", undefined, { reportedSpendUsd: ledger.reportedSpendUsd });
+      return NextResponse.json({
+        kind: "questions",
+        questions: result.questions.map((q) => ({
+          id: q.id,
+          question: q.question,
+          options: q.options.map((o) => o.label),
+        })),
+        cost: costOf(ledger),
+        calls: callsOf(ledger),
+      });
+    }
+
+    const calls = callsOf(ledger);
 
     /**
      * Rendering is its own step with its own failure.
      *
-     * A valid FinalCasePlan means the engine SUCCEEDED. Letting a formatting
-     * bug surface as ENGINE_FAILED would send the next reader looking at the
-     * model, and — worse — invite a re-run that pays for the same plan twice.
+     * A valid answer means the engine SUCCEEDED. Letting a formatting bug
+     * surface as ENGINE_FAILED would send the next reader looking at the model,
+     * and invite a re-run that pays for the same answer twice.
      */
     let rendered: string | null = null;
     try {
-      rendered = result.full ? renderAnalysis(result.full.analysis) : null;
+      // Admin-only: the old structured render, kept as a debug view beside the
+      // narrative. The product surface never shows it.
+      rendered = result.analysis ? renderAnalysis(result.analysis) : null;
     } catch (renderError) {
       recorder.finish("incomplete", describeFailure(renderError, currentStage ?? null), {
         reportedSpendUsd: ledger.reportedSpendUsd,
@@ -165,14 +246,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           ...buildDiagnostics(renderError, {
-            ledger,
-            currentStage,
-            currentAttemptId,
-            capUsd,
-            forceKind: "RENDER_ERROR",
+            ledger, currentStage, currentAttemptId, capUsd, forceKind: "RENDER_ERROR",
           }),
-          // The engine's own metadata survives the render failure. It was paid
-          // for and it is the evidence that the model side worked.
           calls,
         },
         { status: 502 }
@@ -186,21 +261,16 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({
-      mode: result.mode,
-      light: result.light ?? null,
+      kind: "answer",
+      mode,
+      /** The product's deliverable. Everything else here is debug. */
+      answer: result.answer,
+      brief: result.brief,
+      analysis: result.analysis,
       rendered,
-      analysis: result.full?.analysis ?? null,
-      problems: result.full?.problems ?? [],
-      // Codes and schema paths only. What was removed is never carried.
-      warnings: result.full?.warnings ?? [],
-      cost: {
-        reportedSpendUsd: ledger.reportedSpendUsd,
-        budgetedSpendUsd: ledger.budgetedSpendUsd,
-        hasUnknownCharges: ledger.hasUnknownCharges,
-        capUsd: ledger.capUsd,
-        latencyMs: entries.reduce((n, e) => n + e.latencyMs, 0),
-      },
-      // Metadata only, and only the allowlisted fields the ledger already holds.
+      problems: result.problems,
+      warnings: result.warnings,
+      cost: costOf(ledger),
       calls,
     });
   } catch (e) {
