@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { manualAdminId } from "@/lib/megabrain/manualAccess";
+import { manualAccess, manualAdminId } from "@/lib/megabrain/manualAccess";
 import { MANUAL_PRESETS, resolveManualPreset } from "@/lib/megabrain/manualPresets";
 import { SOURCE_REGISTRY, retrieveManualKnowledge } from "@/lib/megabrain/manualKnowledge";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
@@ -28,7 +28,11 @@ function calls(ledger: CostLedger) {
 }
 
 export async function GET() {
-  const ownerId = await manualAdminId();
+  const access = await manualAccess();
+  if (access.status === "guest") {
+    return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  }
+  const ownerId = access.ownerId;
   if (!ownerId) return hidden();
   const persistence = savedCasePersistence();
   return NextResponse.json({

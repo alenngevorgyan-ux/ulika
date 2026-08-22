@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { buildTestPacket } from "@/lib/megabrain/testPacket";
+import SignInForm from "@/app/plan/SignInForm";
 
 export interface ManualAlphaSettings {
   preset: "A" | "B" | "C" | "D" | "E";
@@ -49,12 +50,18 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
   const [activeVariant, setActiveVariant] = useState(0);
   const [notesOpen, setNotesOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [access, setAccess] = useState<"loading" | "guest" | "hidden">("loading");
 
   useEffect(() => {
     let cancelled = false;
     fetch("/api/megabrain-manual").then(async (response) => {
-      if (!cancelled && response.ok) setConfig(await response.json());
-    }).catch(() => {});
+      if (cancelled) return;
+      if (response.ok) {
+        setConfig(await response.json());
+        return;
+      }
+      setAccess(response.status === 401 ? "guest" : "hidden");
+    }).catch(() => { if (!cancelled) setAccess("hidden"); });
     return () => { cancelled = true; };
   }, []);
 
@@ -63,7 +70,15 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
   const savedRequired = settings.memory === "saved" || settings.clarification === "fixed";
   const canCompare = flow?.phase === "completed" && selected.length >= 2;
   const activePreset = useMemo(() => config?.presets.find((p) => p.id === settings.preset), [config, settings.preset]);
-  if (!config) return null;
+  if (!config) {
+    if (access !== "guest") return null;
+    return (
+      <section className="mb-3 rounded-lg border border-panel-border bg-panel p-3 text-sm" data-testid="manual-alpha-sign-in">
+        <div className="mb-2"><span className="font-mono text-accent">FOUNDER ACCESS</span><span className="text-muted"> · sign in on this Preview to unlock Manual Alpha</span></div>
+        <SignInForm returnTo="/chat" compact />
+      </section>
+    );
+  }
 
   const update = <K extends keyof ManualAlphaSettings>(key: K, value: ManualAlphaSettings[K]) =>
     setSettings((current) => ({ ...current, [key]: value }));
@@ -125,7 +140,7 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
   return (
     <>
       <div className="md:hidden fixed left-3 right-3 bottom-[calc(max(0.75rem,env(safe-area-inset-bottom))+5.75rem)] z-30 flex items-center gap-2 pointer-events-none" data-testid="manual-alpha-mobile-bar">
-        <button type="button" onClick={() => onMobileOpenChange(true)} className="pointer-events-auto min-h-11 max-w-[70%] truncate rounded-full border border-accent/50 bg-panel/95 px-3 text-xs text-accent shadow-lg backdrop-blur" aria-label="Open model preset selector">{settings.preset} · {activePreset?.label} ▾</button>
+        <button type="button" onClick={() => onMobileOpenChange(true)} className="pointer-events-auto min-h-11 max-w-[70%] truncate rounded-full border border-accent/50 bg-panel/95 px-3 text-xs text-accent shadow-lg backdrop-blur" aria-label="Open model preset selector">{settings.preset} · {activePreset?.label} · {settings.knowledge.toUpperCase()} ▾</button>
         <button type="button" onClick={() => onMobileOpenChange(true)} className="pointer-events-auto min-h-11 flex-1 truncate rounded-full border border-panel-border bg-panel/95 px-3 text-xs text-muted shadow-lg backdrop-blur" aria-label="Open experiment controls">{settings.knowledge.toUpperCase()} · {settings.memory.toUpperCase()} · {settings.clarification}</button>
       </div>
 
@@ -159,8 +174,8 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
 
     <section className="hidden md:block mb-3 rounded-lg border border-accent/40 bg-panel p-3 text-xs space-y-3" data-testid="manual-alpha-panel">
       <div><span className="font-mono text-accent">MANUAL ALPHA</span> · admin-only · calls happen only on Send/Compare</div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-        <label>Preset<select value={settings.preset} onChange={(e) => update("preset", e.target.value as ManualAlphaSettings["preset"])} className="block w-full bg-background border border-panel-border rounded p-1 mt-1">{config.presets.map((p) => <option key={p.id} value={p.id}>{p.id} — {p.label}</option>)}</select></label>
+      <fieldset><legend className="mb-1 font-medium">Model preset</legend><div className="grid grid-cols-5 gap-2">{config.presets.map((preset) => <button key={preset.id} type="button" onClick={() => update("preset", preset.id)} aria-pressed={settings.preset === preset.id} className={`min-h-12 rounded-md border px-2 text-left transition-colors ${settings.preset === preset.id ? "border-accent bg-accent/10 text-foreground" : "border-panel-border bg-background text-muted hover:border-accent/60"}`}><span className="mr-1 font-mono text-accent">{preset.id}</span><span>{preset.label}</span></button>)}</div></fieldset>
+      <div className="grid grid-cols-3 gap-2">
         <label>Clarification<select value={settings.clarification} onChange={(e) => update("clarification", e.target.value as ManualAlphaSettings["clarification"])} className="block w-full bg-background border border-panel-border rounded p-1 mt-1"><option value="normal">NORMAL</option><option value="off">OFF</option><option value="fixed">FIXED</option></select></label>
         <label>Knowledge<select value={settings.knowledge} onChange={(e) => update("knowledge", e.target.value as ManualAlphaSettings["knowledge"])} className="block w-full bg-background border border-panel-border rounded p-1 mt-1"><option value="off">OFF</option><option value="core">CORE</option><option value="research">RESEARCH</option></select></label>
         <label>Memory<select value={settings.memory} onChange={(e) => update("memory", e.target.value as ManualAlphaSettings["memory"])} className="block w-full bg-background border border-panel-border rounded p-1 mt-1"><option value="off">OFF</option><option value="case">CASE</option><option value="saved" disabled={!config.savedCasePersistence.available}>SAVED</option></select></label>

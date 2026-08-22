@@ -52,6 +52,21 @@ describe("Manual Alpha server controls", () => {
     expect(result.cards.every((card) => card.relevance_score > 0)).toBe(true);
     expect(result.block.length).toBeLessThanOrEqual(12_000);
   });
+
+  it("keeps the admin allowlist gate while offering host-local sign-in to Preview guests", async () => {
+    const [access, route, panel] = await Promise.all([
+      readFile(join(process.cwd(), "src/lib/megabrain/manualAccess.ts"), "utf8"),
+      readFile(join(process.cwd(), "src/app/api/megabrain-manual/route.ts"), "utf8"),
+      readFile(join(process.cwd(), "src/components/chat/ManualAlphaPanel.tsx"), "utf8"),
+    ]);
+    expect(access).toContain('from("app_admins")');
+    expect(access).toContain('status: "denied"');
+    expect(route).toContain('status: 401');
+    expect(route).toContain('error: "AUTH_REQUIRED"');
+    expect(panel).toContain('<SignInForm returnTo="/chat" compact />');
+    expect(panel).toContain('data-testid="manual-alpha-panel"');
+    expect(panel).toContain("config.presets.map");
+  });
 });
 
 describe("explicit Saved Case persistence", () => {

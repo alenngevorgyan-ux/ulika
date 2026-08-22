@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { getBrowserSupabase } from "@/lib/supabase/client";
 
-export default function SignInForm() {
+export default function SignInForm({ returnTo = "/plan", compact = false }: { returnTo?: string; compact?: boolean }) {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
@@ -13,7 +13,7 @@ export default function SignInForm() {
     setStatus("sending");
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: window.location.origin + "/plan" },
+      options: { emailRedirectTo: window.location.origin + returnTo },
     });
     setStatus(error ? "error" : "sent");
   }
@@ -27,14 +27,15 @@ export default function SignInForm() {
   }
 
   return (
-    <div className="flex gap-2 max-w-sm">
+    <div className={`flex gap-2 ${compact ? "w-full" : "max-w-sm"}`}>
       <input
         type="email"
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && send()}
-        placeholder="email"
-        className="flex-1 bg-panel border border-panel-border rounded-md px-4 py-2.5 text-sm outline-none focus:border-accent"
+        placeholder="Founder email"
+        aria-label="Founder email"
+        className="min-w-0 flex-1 bg-panel border border-panel-border rounded-md px-3 sm:px-4 py-2.5 text-base md:text-sm outline-none focus:border-accent"
       />
       <button
         onClick={send}
