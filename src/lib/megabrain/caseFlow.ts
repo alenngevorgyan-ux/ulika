@@ -3,6 +3,7 @@ import type { AnalysisMode } from "./analysisMode";
 import { capFor } from "./analysisMode";
 import type { ClarifyQuestion } from "./clarify";
 import type { FollowUpAction } from "./followUp";
+import type { ClarificationMode, KnowledgeMode, ManualPresetId, MemoryMode } from "./manualPresets";
 
 export type CaseFlowPhase =
   | "intake"
@@ -43,12 +44,46 @@ export interface CaseFlow {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  manual: {
+    preset: ManualPresetId;
+    clarification: ClarificationMode;
+    knowledge: KnowledgeMode;
+    memory: MemoryMode;
+    savedCaseId: string | null;
+    fixedAnswers: Record<string, string>;
+    memoryContext: string;
+    retrieval: {
+      cards: { id: string; name: string; sourceIds: string[]; evidenceStrength: string }[];
+      latencyMs: number;
+      tokenEstimate: number;
+      limitation: string | null;
+    } | null;
+    snapshot: {
+      actors: string[];
+      documentedFacts: string[];
+      reportedFacts: string[];
+      hypotheses: string[];
+      unresolvedQuestions: string[];
+      recommendation: string;
+    } | null;
+    telemetry: {
+      reportedSpendUsd: number;
+      conservativeSpendUsd: number;
+      latencyMs: number;
+      calls: { stage: string; model: string; reasoningTokens: number; inputTokens: number; outputTokens: number; cost: number | null }[];
+    } | null;
+  } | null;
 }
 
 export type PublicCaseFlow = Pick<
   CaseFlow,
   "id" | "conversationId" | "phase" | "mode" | "capUsd" | "answer" | "followUps" | "safeError"
-> & { questions: PublicQuestion[]; budgetedSpendUsd: number; remainingUsd: number };
+> & {
+  questions: PublicQuestion[];
+  budgetedSpendUsd: number;
+  remainingUsd: number;
+  manual: null | Pick<NonNullable<CaseFlow["manual"]>, "preset" | "clarification" | "knowledge" | "memory" | "savedCaseId" | "retrieval" | "telemetry">;
+};
 
 const TTL_MS = 30 * 60 * 1000;
 const MAX_FLOWS_PER_OWNER = 10;
@@ -81,6 +116,8 @@ export function createCaseFlow(input: {
   responseLanguage: string;
   jurisdiction: { country: string; region?: string };
   requestId: string;
+  capUsd?: number;
+  manual?: CaseFlow["manual"];
 }): CaseFlow {
   purgeExpired();
   const ownerFlows = [...flows.values()].filter((f) => f.ownerId === input.ownerId);
@@ -97,7 +134,7 @@ export function createCaseFlow(input: {
     conversationId: input.conversationId,
     phase: "intake",
     mode: input.mode,
-    capUsd: capFor(input.mode),
+    capUsd: input.capUsd ?? capFor(input.mode),
     budgetedSpendUsd: 0,
     account: input.account,
     responseLanguage: input.responseLanguage,
@@ -112,6 +149,7 @@ export function createCaseFlow(input: {
     createdAt: now,
     updatedAt: now,
     expiresAt: now + TTL_MS,
+    manual: input.manual ?? null,
   };
   flows.set(flow.id, flow);
   return flow;
@@ -253,6 +291,15 @@ export function publicFlow(flow: CaseFlow): PublicCaseFlow {
     answer: flow.answer,
     followUps: [...flow.followUps],
     safeError: flow.safeError,
+    manual: flow.manual ? {
+      preset: flow.manual.preset,
+      clarification: flow.manual.clarification,
+      knowledge: flow.manual.knowledge,
+      memory: flow.manual.memory,
+      savedCaseId: flow.manual.savedCaseId,
+      retrieval: flow.manual.retrieval ? structuredClone(flow.manual.retrieval) : null,
+      telemetry: flow.manual.telemetry ? structuredClone(flow.manual.telemetry) : null,
+    } : null,
   };
 }
 
