@@ -124,14 +124,75 @@ export type Transport = (req: CompletionRequest) => Promise<CompletionResult>;
  * request failed (404)" told us the request failed and nothing about WHICH
  * request, which is how a $0.0157 run ended with no idea what it bought.
  */
+/**
+ * What a provider 400 actually meant, from a closed vocabulary.
+ *
+ * Derived ONLY from enum-like fields — status, error.code, error.type,
+ * error.param — never from the message. A provider's prose routinely quotes the
+ * offending request back, and the offending request is somebody's situation.
+ * Unrecognised stays UNKNOWN_PROVIDER_400 rather than being talked into a
+ * category by a string that looked promising.
+ */
+export type ProviderErrorCategory =
+  | "OUTPUT_LIMIT_UNSUPPORTED"
+  | "PARAMETER_UNSUPPORTED"
+  | "SCHEMA_UNSUPPORTED"
+  | "PROVIDER_ROUTE_UNAVAILABLE"
+  | "PRICE_CONSTRAINT_REJECTED"
+  | "CONTEXT_LIMIT"
+  | "UNKNOWN_PROVIDER_400";
+
+/** Enum-like fields only. Anything not matching the token shape is dropped. */
+export interface ProviderErrorFacts {
+  code: string | null;
+  type: string | null;
+  param: string | null;
+}
+
+const OUTPUT_PARAMS = new Set(["max_tokens", "max_completion_tokens", "max_output_tokens"]);
+const SCHEMA_PARAMS = new Set(["response_format", "json_schema", "schema", "structured_outputs"]);
+const PRICE_PARAMS = new Set(["max_price", "provider.max_price", "price"]);
+
+/**
+ * Classify a provider failure without reading its prose.
+ *
+ * `param` is the load-bearing field and the reason it is read at all: an
+ * OpenAI-shaped 400 for an unsupported schema construct names
+ * "response_format" there while leaving code null, which is exactly the case
+ * that would otherwise be indistinguishable from every other 400.
+ */
+export function classifyProviderError(status: number, f: ProviderErrorFacts): ProviderErrorCategory {
+  const param = f.param?.toLowerCase() ?? "";
+  const code = (f.code ?? "").toLowerCase();
+  const type = (f.type ?? "").toLowerCase();
+  const says = (needle: string) => code.includes(needle) || type.includes(needle);
+
+  if (status === 402 || says("credit") || says("insufficient")) return "PRICE_CONSTRAINT_REJECTED";
+  if (status === 404 || says("no_endpoints") || says("no_allowed_providers") || says("route"))
+    return "PROVIDER_ROUTE_UNAVAILABLE";
+  if (says("context_length") || says("context_window")) return "CONTEXT_LIMIT";
+  if (PRICE_PARAMS.has(param) || says("max_price")) return "PRICE_CONSTRAINT_REJECTED";
+  if (OUTPUT_PARAMS.has(param) || says("max_tokens") || says("max_completion_tokens"))
+    return "OUTPUT_LIMIT_UNSUPPORTED";
+  if (SCHEMA_PARAMS.has(param) || says("schema") || says("response_format")) return "SCHEMA_UNSUPPORTED";
+  if (param.length > 0 || says("unsupported_parameter") || says("invalid_parameter"))
+    return "PARAMETER_UNSUPPORTED";
+  return "UNKNOWN_PROVIDER_400";
+}
+
 export class ProviderHttpError extends Error {
+  readonly category: ProviderErrorCategory;
   constructor(
     readonly status: number,
     readonly requestedModel: string,
-    readonly code: string | null
+    readonly code: string | null,
+    /** Enum-like param name from the provider, when it named one. */
+    readonly param: string | null = null,
+    type: string | null = null
   ) {
     super(`Provider request failed (${status}) for ${requestedModel}${code ? ` [${code}]` : ""}`);
     this.name = "ProviderHttpError";
+    this.category = classifyProviderError(status, { code, type, param });
   }
 }
 
@@ -217,7 +278,14 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         // which in this product is somebody's job, marriage or dispute. The
         // status code and, when present, a short machine code are enough to
         // act on; the prose is not worth the leak.
-        throw new ProviderHttpError(res.status, req.modelSlug, await errorCode(res));
+        const facts = await errorFacts(res);
+        throw new ProviderHttpError(
+          res.status,
+          req.modelSlug,
+          [facts.code, facts.type].filter(Boolean).join("/") || null,
+          facts.param,
+          facts.type
+        );
       }
 
       const data = (await res.json()) as Record<string, unknown>;
@@ -292,16 +360,25 @@ export function readTelemetry(raw: unknown): ResponseTelemetry {
  * Deliberately narrow: `code` and `type` are enum-like and safe, `message` is
  * free text written by the provider about our request and is never read.
  */
-async function errorCode(res: Response): Promise<string | null> {
+async function errorFacts(res: Response): Promise<ProviderErrorFacts> {
+  const token = (v: unknown): string | null => {
+    if (typeof v !== "string" && typeof v !== "number") return null;
+    const t = String(v);
+    // Enum-like only. A provider that puts a sentence in `param` gets dropped,
+    // not truncated into our logs.
+    return t.length > 0 && t.length <= 40 && /^[\w.-]+$/.test(t) ? t : null;
+  };
   try {
-    const data = (await res.json()) as { error?: { code?: unknown; type?: unknown } };
-    const parts = [data.error?.code, data.error?.type]
-      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
-      .map((v) => String(v))
-      .filter((v) => v.length <= 40 && /^[\w.-]+$/.test(v));
-    return parts.length ? parts.join("/") : null;
+    const data = (await res.json()) as {
+      error?: { code?: unknown; type?: unknown; param?: unknown; metadata?: { provider_name?: unknown } };
+    };
+    return {
+      code: token(data.error?.code),
+      type: token(data.error?.type),
+      param: token(data.error?.param),
+    };
   } catch {
-    return null;
+    return { code: null, type: null, param: null };
   }
 }
 

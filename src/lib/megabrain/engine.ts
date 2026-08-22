@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { BudgetExceededError, CostLedger, MODE_CAPS, RESERVATION_SAFETY_MARGIN, type CaseMode } from "./costLedger";
-import { costOf, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
+import { assertCeilingSupported, costOf, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
 import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
 import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type Transport } from "./transport";
@@ -265,6 +265,14 @@ async function stage(
   jsonSchema: { name: string; schema: Record<string, unknown> }
 ): Promise<unknown> {
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
+  /**
+   * Checked before the reservation, so an unsendable ceiling costs nothing.
+   *
+   * Fail-closed by design: a model with no recorded capability is refused
+   * rather than tried. The alternative is what already happened once — a
+   * ceiling nobody had checked, a paid call, and a 400 that named nothing.
+   */
+  assertCeilingSupported(spec, maxOutputTokens);
 
   for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
     // Local id, minted before the request. Ties an attempt line to its outcome

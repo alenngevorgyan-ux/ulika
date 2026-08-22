@@ -25,6 +25,43 @@ export interface ModelSpec {
   contextTokens: number;
   /** Does this slug accept response_format json_schema? Affects the fallback. */
   structuredOutputs: boolean;
+  /**
+   * Largest completion the provider will produce, from OpenRouter's own
+   * catalogue rather than from memory.
+   *
+   * "unpublished" is a real answer and a different one from "we never looked":
+   * some providers publish no completion cap at all. A model MISSING from this
+   * table has no entry, and modelFor refuses it — a ceiling we cannot check is
+   * a ceiling we must not send, which is the whole lesson of the extract
+   * truncation.
+   */
+  maxCompletionTokens: number | "unpublished";
+}
+
+/**
+ * Refuse to send a ceiling the model is not known to accept.
+ *
+ * Fail-closed on an unknown model: the cost of stopping is a refused run, the
+ * cost of guessing is a paid call that comes back 400 or, worse, silently
+ * truncated.
+ */
+export class CeilingUnsupported extends Error {
+  readonly code = "OUTPUT_LIMIT_UNSUPPORTED";
+  constructor(
+    readonly slug: string,
+    readonly requested: number,
+    readonly capability: number | "unpublished" | "unknown"
+  ) {
+    super(`Model ${slug} cannot be asked for ${requested} output tokens (capability: ${capability}).`);
+    this.name = "CeilingUnsupported";
+  }
+}
+
+export function assertCeilingSupported(spec: ModelSpec, maxOutputTokens: number): void {
+  const cap = spec.maxCompletionTokens;
+  if (cap === undefined) throw new CeilingUnsupported(spec.slug, maxOutputTokens, "unknown");
+  if (cap === "unpublished") return;
+  if (maxOutputTokens > cap) throw new CeilingUnsupported(spec.slug, maxOutputTokens, cap);
 }
 
 export const MODELS: Record<string, ModelSpec> = {
@@ -35,6 +72,8 @@ export const MODELS: Record<string, ModelSpec> = {
     outputPerMTok: 1.5,
     contextTokens: 1_048_576,
     structuredOutputs: true,
+    // From OpenRouter's catalogue, read 2026-08-22. Not from memory.
+    maxCompletionTokens: 65_536,
   },
   "claude-sonnet-5": {
     slug: "anthropic/claude-sonnet-5",
@@ -43,6 +82,8 @@ export const MODELS: Record<string, ModelSpec> = {
     outputPerMTok: 10,
     contextTokens: 1_000_000,
     structuredOutputs: true,
+    // From OpenRouter's catalogue, read 2026-08-22. Not from memory.
+    maxCompletionTokens: 128_000,
   },
   "claude-haiku-4.5": {
     slug: "anthropic/claude-haiku-4.5",
@@ -51,6 +92,8 @@ export const MODELS: Record<string, ModelSpec> = {
     outputPerMTok: 5,
     contextTokens: 200_000,
     structuredOutputs: true,
+    // From OpenRouter's catalogue, read 2026-08-22. Not from memory.
+    maxCompletionTokens: 64_000,
   },
   "grok-4.3": {
     slug: "x-ai/grok-4.3",
@@ -59,6 +102,8 @@ export const MODELS: Record<string, ModelSpec> = {
     outputPerMTok: 2.5,
     contextTokens: 1_000_000,
     structuredOutputs: true,
+    // From OpenRouter's catalogue, read 2026-08-22. Not from memory.
+    maxCompletionTokens: "unpublished",
   },
 };
 

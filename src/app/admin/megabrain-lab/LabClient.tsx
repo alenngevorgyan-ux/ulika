@@ -43,6 +43,7 @@ interface Diagnostics {
   latencyMs: number;
   httpStatus: number | null;
   finishReason: string | null;
+  providerCategory: string | null;
   schemaPaths: string[];
   problemCount: number;
   recommendation: string;
@@ -60,7 +61,7 @@ function localFailure(kind: string, recommendation: string): Diagnostics {
   return {
     error: kind, kind, stage: null, attemptId: null, callsSent: 0, retries: 0,
     reportedSpendUsd: 0, hasUnknownCharges: false, remainingUsd: 0, capUsd: 0,
-    latencyMs: 0, httpStatus: null, finishReason: null, schemaPaths: [],
+    latencyMs: 0, httpStatus: null, finishReason: null, providerCategory: null, schemaPaths: [],
     problemCount: 0, recommendation,
   };
 }
@@ -256,6 +257,7 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
             вызовов отправлено: {error.callsSent} · ретраев: {error.retries}
             {error.finishReason && <> · finish_reason: <b>{error.finishReason}</b></>}
             {error.httpStatus !== null && <> · HTTP {error.httpStatus}</>}
+            {error.providerCategory && <> · <b>{error.providerCategory}</b></>}
             {error.attemptId && <> · attempt {error.attemptId}</>}
           </div>
 

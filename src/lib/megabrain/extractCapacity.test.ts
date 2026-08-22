@@ -9,6 +9,9 @@ import {
 import { CostLedger } from "./costLedger";
 import { OutputTruncatedError } from "./transport";
 import { EXTRACT_SCHEMA, EXTRACT_LIMITS } from "./jsonSchemas";
+import { classifyProviderError, ProviderHttpError } from "./transport";
+import { assertCeilingSupported, CeilingUnsupported } from "./modelRouter";
+import { buildDiagnostics } from "./labDiagnostics";
 import { extractPrompt, analysePrompt, strategisePrompt } from "./prompts";
 import { modelFor, resolveConfiguration, costOf, estimateTokens } from "./modelRouter";
 import { modeCost } from "./costReport";
@@ -135,33 +138,102 @@ describe("a case too big for the mode is refused before it costs anything", () =
   });
 });
 
-describe("compaction is enforced where generation happens", () => {
-  it("caps every list the extract stage can pad", () => {
-    const schema = JSON.parse(JSON.stringify(EXTRACT_SCHEMA.schema)) as Record<string, never>;
-    const frame = (schema as never as { properties: Record<string, { properties: Record<string, { maxItems?: number; description?: string }> }> })
-      .properties.frame.properties;
-    expect(frame.reportedFacts.maxItems).toBe(EXTRACT_LIMITS.reportedFacts);
-    expect(frame.interpretations.maxItems).toBe(EXTRACT_LIMITS.interpretations);
-    expect(frame.unknowns.maxItems).toBe(EXTRACT_LIMITS.unknowns);
-    expect(frame.constraints.maxItems).toBe(EXTRACT_LIMITS.constraints);
-    expect(frame.reportedEvidenceAvailable.maxItems).toBe(EXTRACT_LIMITS.reportedEvidenceAvailable);
-    // Atomicity is stated where the provider reads it, not only in the prompt.
-    expect(frame.reportedFacts.description).toMatch(/atomic/i);
+describe("compaction is instructed, because it cannot be enforced in the schema", () => {
+  it("carries no array-length keyword — strict structured outputs rejects them", () => {
+    const raw = JSON.stringify(EXTRACT_SCHEMA);
+    // This exact combination — strict: true plus maxItems — is what produced
+    // HTTP 400 from the provider. The keyword must not come back.
+    expect(raw).not.toContain("maxItems");
+    expect(raw).not.toContain("minItems");
+    expect(raw).not.toContain("uniqueItems");
+    expect(raw).not.toContain("maxLength");
+    expect(raw).not.toContain("pattern");
+  });
+
+  it("states the ceilings where the model will actually read them", () => {
+    const raw = JSON.stringify(EXTRACT_SCHEMA);
+    expect(raw).toContain(`at most ${EXTRACT_LIMITS.reportedFacts}`);
+    expect(raw).toMatch(/atomic/i);
+    expect(systems.extract).toContain(`at most ${EXTRACT_LIMITS.reportedFacts} reportedFacts`);
+    expect(systems.extract).toContain(`${EXTRACT_LIMITS.actors} actors`);
   });
 
   it("keeps facts and interpretations from becoming the same list", () => {
-    // The rule the model has to follow, in the prompt it actually receives.
     expect(systems.extract).toMatch(/reportedFacts OR the reading of it goes in interpretations/);
     expect(systems.extract).toMatch(/Do NOT quote the account at length/);
     // And the thing compaction must never do.
     expect(systems.extract).toMatch(/deadlines and dates, amounts/);
   });
+});
 
-  it("states the same numbers the schema enforces", () => {
-    // Drift guard: a prompt promising more room than the schema allows makes the
-    // model plan for entries it will never be permitted to emit.
-    expect(systems.extract).toContain(`at most ${EXTRACT_LIMITS.reportedFacts} reportedFacts`);
-    expect(systems.extract).toContain(`${EXTRACT_LIMITS.actors} actors`);
+describe("a ceiling is never sent to a model not known to accept it", () => {
+  it("passes when the capability covers it", () => {
+    expect(() => assertCeilingSupported(specs.extract, MAX_OUTPUT_TOKENS.extract)).not.toThrow();
+    // The capability that was actually checked, not one from memory.
+    expect(specs.extract.maxCompletionTokens).toBe(65_536);
+  });
+
+  it("refuses a ceiling above a published capability", () => {
+    const small = { ...specs.extract, maxCompletionTokens: 1000 };
+    expect(() => assertCeilingSupported(small, 3000)).toThrow(CeilingUnsupported);
+  });
+
+  it("fails closed when the capability was never recorded", () => {
+    const unchecked = { ...specs.extract } as Partial<typeof specs.extract>;
+    delete unchecked.maxCompletionTokens;
+    expect(() => assertCeilingSupported(unchecked as typeof specs.extract, 100)).toThrow(CeilingUnsupported);
+  });
+
+  it("allows a model whose provider publishes no completion cap", () => {
+    expect(specs.strategise.maxCompletionTokens).toBe("unpublished");
+    expect(() => assertCeilingSupported(specs.strategise, MAX_OUTPUT_TOKENS.strategise)).not.toThrow();
+  });
+
+  it("blocks before the reservation, so an unsendable ceiling costs nothing", async () => {
+    const calls = { n: 0 };
+    const book = new CostLedger("standard", 0.05);
+    const err = await runCase(
+      { account: SHORT_ACCOUNT, ledger: book, configurationId: "uncheckable" },
+      fixtureTransport({ callCount: calls })
+    ).catch((e) => e);
+    // "uncheckable" is not a real configuration; the run must fail before it
+    // reaches a provider either way.
+    expect(err).toBeInstanceOf(Error);
+    expect(calls.n).toBe(0);
+    expect(book.reportedSpendUsd).toBe(0);
+  });
+});
+
+describe("a provider 400 is classified without reading its prose", () => {
+  it("maps enum-like fields onto the fixed vocabulary", () => {
+    expect(classifyProviderError(400, { code: null, type: "invalid_request_error", param: "response_format" }))
+      .toBe("SCHEMA_UNSUPPORTED");
+    expect(classifyProviderError(400, { code: null, type: null, param: "max_tokens" }))
+      .toBe("OUTPUT_LIMIT_UNSUPPORTED");
+    expect(classifyProviderError(400, { code: null, type: null, param: "max_price" }))
+      .toBe("PRICE_CONSTRAINT_REJECTED");
+    expect(classifyProviderError(400, { code: "context_length_exceeded", type: null, param: null }))
+      .toBe("CONTEXT_LIMIT");
+    expect(classifyProviderError(404, { code: null, type: null, param: null }))
+      .toBe("PROVIDER_ROUTE_UNAVAILABLE");
+    expect(classifyProviderError(400, { code: null, type: null, param: "top_k" }))
+      .toBe("PARAMETER_UNSUPPORTED");
+    // No usable signal is its own answer, not a guess dressed as one.
+    expect(classifyProviderError(400, { code: null, type: null, param: null }))
+      .toBe("UNKNOWN_PROVIDER_400");
+  });
+
+  it("never lets a provider body reach the client", () => {
+    const leak = "СЕКРЕТ ПОЛЬЗОВАТЕЛЯ: он присвоил мой проект";
+    const err = new ProviderHttpError(400, "google/gemini-3.1-flash-lite", null, "response_format", "invalid_request_error");
+    const d = buildDiagnostics(err, { ledger: new CostLedger("standard", 0.05), capUsd: 0.05 });
+    const blob = JSON.stringify(d);
+    expect(blob).not.toContain(leak);
+    expect(d.providerCategory).toBe("SCHEMA_UNSUPPORTED");
+    expect(d.httpStatus).toBe(400);
+    // Refused before a call completed: nothing to charge for.
+    expect(d.callsSent).toBe(0);
+    expect(d.reportedSpendUsd).toBe(0);
   });
 });
 

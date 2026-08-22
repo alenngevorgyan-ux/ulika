@@ -10,26 +10,32 @@ import { LEVERAGE_KINDS, PHRASE_ROLES, REDIRECT_CATEGORIES, STRATEGY_KINDS } fro
  * and occasionally return a structurally valid object with every array empty.
  */
 
-const strings = (description: string, maxItems?: number) => ({
+const strings = (description: string) => ({
   type: "array",
   items: { type: "string" },
-  ...(maxItems === undefined ? {} : { maxItems }),
   description,
 });
 
 /**
  * Ceilings on how much the extract stage may emit.
  *
- * These are enforced where generation happens — as maxItems inside the schema
- * the provider decodes against — rather than by trimming a finished object. A
- * post-hoc trim throws away tokens already paid for, and it silently discards
- * whichever fact the model happened to put last, which is not the same as the
- * least important one.
- *
  * The numbers are what a hard human situation actually needs. A dispute with
  * more than four actors or more than a dozen distinct load-bearing facts is not
- * being under-served by these limits; it is being told, correctly, that it
- * needs a bigger mode.
+ * being under-served by them; it is being told, correctly, that it needs a
+ * bigger mode.
+ *
+ * NOT enforced in the schema. Stated in the prompt and in field descriptions.
+ *
+ * They were maxItems constraints for one commit, and that combination —
+ * `strict: true` structured outputs plus an array-length keyword — is what the
+ * provider rejected with HTTP 400. Strict Structured Outputs does not accept
+ * array-length keywords (minItems/maxItems/uniqueItems and friends), so the
+ * only place these numbers can live is the instruction the model reads.
+ *
+ * The honest consequence: compaction is now INSTRUCTED, not GUARANTEED. The
+ * 3000-token ceiling is what actually bounds the stage, and it clears the
+ * expected output for a long case with room to spare. If a future run truncates
+ * again, the answer is not to reintroduce these as schema keywords.
  */
 export const EXTRACT_LIMITS = {
   reportedFacts: 12,
@@ -56,16 +62,17 @@ export const EXTRACT_SCHEMA = {
       documentedFacts: strings("MUST BE EMPTY in V0 — nothing here can inspect a document."),
       reportedFacts: {
         type: "array",
-        maxItems: EXTRACT_LIMITS.reportedFacts,
         description:
-          "Stated by the user. Testimony, not evidence. Ids are referenced by actor claims. " +
-          "ONE atomic claim each, under about 15 words. Not a retelling of the account.",
+          `Stated by the user. Testimony, not evidence. Ids are referenced by actor claims. ` +
+          `ONE atomic claim each, under about 15 words, at most ${EXTRACT_LIMITS.reportedFacts}. ` +
+          `Not a retelling of the account.`,
         items: obj({ id: { type: "string" }, text: { type: "string" } }),
       },
       reportedEvidenceAvailable: {
         type: "array",
-        maxItems: EXTRACT_LIMITS.reportedEvidenceAvailable,
-        description: "What the user SAYS they can produce. Never treated as produced.",
+        description:
+          `What the user SAYS they can produce. Never treated as produced. ` +
+          `At most ${EXTRACT_LIMITS.reportedEvidenceAvailable}.`,
         items: obj({
           type: { type: "string" },
           description: { type: "string" },
@@ -73,21 +80,23 @@ export const EXTRACT_SCHEMA = {
         }),
       },
       interpretations: strings(
-        "Readings already layered on by the user. A reading, never a restatement of a fact " +
-          "already listed in reportedFacts.",
-        EXTRACT_LIMITS.interpretations
+        `Readings already layered on by the user. A reading, never a restatement of a fact ` +
+          `already listed in reportedFacts. At most ${EXTRACT_LIMITS.interpretations}.`
       ),
-      unknowns: strings("Gaps that would change the strategy if filled.", EXTRACT_LIMITS.unknowns),
-      constraints: strings("Money, time, legal, relational limits.", EXTRACT_LIMITS.constraints),
+      unknowns: strings(
+        `Gaps that would change the strategy if filled. At most ${EXTRACT_LIMITS.unknowns}.`
+      ),
+      constraints: strings(
+        `Money, time, legal, relational limits. At most ${EXTRACT_LIMITS.constraints}.`
+      ),
       stakes: { type: "string" },
     }),
     actors: obj({
       actors: {
         type: "array",
-        maxItems: EXTRACT_LIMITS.actors,
         items: obj({
           label: { type: "string" },
-          goals: { type: "array", maxItems: EXTRACT_LIMITS.claimsPerActorField, items: {
+          goals: { type: "array", items: {
           type: "object",
           additionalProperties: false,
           required: ["value", "basis", "supportingFactIds"],
@@ -98,7 +107,7 @@ export const EXTRACT_SCHEMA = {
             uncertainty: { type: "string", description: "Required when basis is inferred." },
           },
         } },
-          fears: { type: "array", maxItems: EXTRACT_LIMITS.claimsPerActorField, items: {
+          fears: { type: "array", items: {
           type: "object",
           additionalProperties: false,
           required: ["value", "basis", "supportingFactIds"],
@@ -109,7 +118,7 @@ export const EXTRACT_SCHEMA = {
             uncertainty: { type: "string", description: "Required when basis is inferred." },
           },
         } },
-          resources: { type: "array", maxItems: EXTRACT_LIMITS.claimsPerActorField, items: {
+          resources: { type: "array", items: {
           type: "object",
           additionalProperties: false,
           required: ["value", "basis", "supportingFactIds"],
@@ -131,7 +140,7 @@ export const EXTRACT_SCHEMA = {
             uncertainty: { type: "string", description: "Required when basis is inferred." },
           },
         },
-          dependencies: { type: "array", maxItems: EXTRACT_LIMITS.claimsPerActorField, items: {
+          dependencies: { type: "array", items: {
           type: "object",
           additionalProperties: false,
           required: ["value", "basis", "supportingFactIds"],
@@ -142,7 +151,7 @@ export const EXTRACT_SCHEMA = {
             uncertainty: { type: "string", description: "Required when basis is inferred." },
           },
         } },
-          likelyReactions: { type: "array", maxItems: EXTRACT_LIMITS.claimsPerActorField, items: {
+          likelyReactions: { type: "array", items: {
           type: "object",
           additionalProperties: false,
           required: ["value", "basis", "supportingFactIds"],

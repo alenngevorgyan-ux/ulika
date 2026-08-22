@@ -103,6 +103,8 @@ export interface LabDiagnostics {
   latencyMs: number;
   httpStatus: number | null;
   finishReason: string | null;
+  /** Safe enum for a provider failure. Never derived from the provider's prose. */
+  providerCategory: string | null;
   schemaPaths: string[];
   /** How many problems the validator reported, including any not shown above. */
   problemCount: number;
@@ -123,7 +125,7 @@ const RECOMMENDATION: Record<LabErrorKind, string> = {
   ACCOUNTING_ERROR:
     "Счёт от провайдера разошёлся с ожидаемым или сменилась маршрутизация. Прогон остановлен до следующего вызова; уже сделанный отменить нельзя.",
   PROVIDER_HTTP_ERROR:
-    "Провайдер вернул ошибку HTTP. Тело ответа намеренно не читается. Смотрите статус и модель.",
+    "Провайдер вернул ошибку HTTP. Тело ответа намеренно не читается — смотрите статус, модель и категорию. Денег за отклонённый запрос не списано.",
   RENDER_ERROR:
     "Движок отработал успешно, план валиден — упала только отрисовка. Повторный вызов модели не нужен и не выполнялся.",
   INTERNAL_ERROR: "Неклассифицированное исключение. Смотрите журнал прогона: стадия и attempt id записаны по ходу.",
@@ -172,6 +174,7 @@ export function buildDiagnostics(
     httpStatus: typeof (e as { status?: unknown })?.status === "number" ? (e as { status: number }).status : null,
     finishReason:
       (e as { finishReason?: string })?.finishReason ?? last?.finishReason ?? last?.nativeFinishReason ?? null,
+    providerCategory: (e as { category?: string })?.category ?? null,
     schemaPaths: safeSchemaPaths(problems),
     problemCount: Array.isArray(problems) ? problems.length : 0,
     recommendation: RECOMMENDATION[kind],
