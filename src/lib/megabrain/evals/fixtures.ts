@@ -355,6 +355,12 @@ interface FixtureOptions {
    * mode that produced an undiagnosable ENGINE_FAILED on the first complex case.
    */
   truncateStage?: "extract" | "analyse" | "strategise";
+  /**
+   * Reproduces the exact live failure: two optional actor claims marked
+   * `reported` with no supportingFactIds, at actors[0].goals[1] and
+   * actors[0].likelyReactions[0]. Everything else in the frame is complete.
+   */
+  unsupportedActorClaims?: boolean;
   /** Answer the merged two-call ablation schema. */
   combined?: boolean;
   /** Try to smuggle a user claim into documentedFacts. */
@@ -506,7 +512,23 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
         : opts.documentedFactsLeak
           ? { ...A.frame, documentedFacts: ["User has the commit history."] }
           : A.frame;
-      const actors = opts.inventedActor
+      const withUnsupported = () => {
+        const first = A.actors.actors[0];
+        const orphan = (v: string) => ({ value: v, basis: "reported", supportingFactIds: [] });
+        return {
+          actors: [
+            {
+              ...first,
+              goals: [first.goals[0], orphan("Добиться публичного признания авторства")],
+              likelyReactions: [orphan("Пойдёт напрямую к директору"), ...first.likelyReactions],
+            },
+            ...A.actors.actors.slice(1),
+          ],
+        };
+      };
+      const actors = opts.unsupportedActorClaims
+        ? withUnsupported()
+        : opts.inventedActor
         ? {
             actors: [
               ...A.actors.actors.slice(0, 2),

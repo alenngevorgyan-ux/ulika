@@ -5,6 +5,7 @@ import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIG
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
 import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type Transport } from "./transport";
 import { checkLanguage, resolveLanguage } from "./language";
+import { sanitizeExtract, type SanitationWarning } from "./sanitize";
 import { capFor, ModeNotAvailable, MODES, type AnalysisMode } from "./analysisMode";
 import {
   validateActors,
@@ -86,6 +87,13 @@ export interface EngineResult {
   configuration: Configuration;
   /** Non-fatal validator complaints, kept for the benchmark's quality report. */
   problems: string[];
+  /**
+   * What deterministic sanitation removed or normalised before validation.
+   *
+   * Codes and schema paths only. A run that finished with warnings finished —
+   * the warnings say what was dropped, not that the answer is unsafe.
+   */
+  warnings: SanitationWarning[];
 }
 
 /** Output ceilings per stage. Reserved against, not hoped for. */
@@ -410,6 +418,7 @@ export async function runCase(
     ? input.ledger.envelope(MODE_CAPS[mode], mode)
     : new CostLedger(mode, MODE_CAPS[mode]);
   const problems: string[] = [];
+  const warnings: SanitationWarning[] = [];
   const sentinel = randomBytes(4).toString("hex");
   const account = fence("ACCOUNT", input.account, sentinel);
   const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
@@ -464,8 +473,20 @@ export async function runCase(
     EXTRACT_SCHEMA
   )) as Record<string, unknown>;
 
-  const frame = validateFrame(rawExtract.frame);
-  const actors = validateActors(rawExtract.actors, frame.value);
+  /**
+   * Deterministic sanitation, between parsing and validation.
+   *
+   * Runs on every reply, costs nothing, and calls no model. Its job is to stop
+   * a complete, already-paid-for case file being destroyed by a couple of
+   * optional claims the model could not support — while leaving the validators
+   * exactly as strict as they were about everything that matters.
+   */
+  const cleaned = sanitizeExtract(rawExtract);
+  warnings.push(...cleaned.warnings);
+  const extracted = cleaned.value as Record<string, unknown>;
+
+  const frame = validateFrame(extracted.frame);
+  const actors = validateActors(extracted.actors, frame.value);
   problems.push(...frame.problems, ...actors.problems);
   // ok, not value. Validators always return a value — that is what makes them
   // useful for reporting — so checking the value was a check that could never
@@ -504,6 +525,7 @@ export async function runCase(
       ledger,
       configuration,
       problems,
+      warnings,
     };
   }
 
@@ -581,6 +603,7 @@ export async function runCase(
     ledger,
     configuration,
     problems,
+    warnings,
   };
 }
 

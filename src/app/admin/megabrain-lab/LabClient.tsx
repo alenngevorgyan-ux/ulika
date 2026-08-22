@@ -98,6 +98,7 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
     cost: { reportedSpendUsd: number; budgetedSpendUsd: number; capUsd: number; latencyMs: number; hasUnknownCharges: boolean };
     calls: CallRow[];
     problems: string[];
+    warnings: { code: string; path: string }[];
   } | null>(null);
 
   // A ref, not state: a second click must be impossible before React re-renders.
@@ -306,6 +307,20 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
 
       {result && (
         <section className="space-y-4">
+          {result.warnings?.length > 0 && (
+            <details className="text-xs rounded-md border border-panel-border p-2">
+              <summary className="cursor-pointer">
+                Завершено с предупреждениями: {result.warnings.length}
+              </summary>
+              <ul className="mt-2 font-mono">
+                {result.warnings.map((w, i) => (
+                  <li key={i}>
+                    {w.code} · {w.path}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           <div className="text-xs text-muted">
             ${result.cost.reportedSpendUsd.toFixed(4)} из ${result.cost.capUsd.toFixed(2)} · {(result.cost.latencyMs / 1000).toFixed(1)} с
             {result.cost.hasUnknownCharges && " · есть неоценённые вызовы"}

@@ -191,6 +191,8 @@ export async function POST(req: NextRequest) {
       rendered,
       analysis: result.full?.analysis ?? null,
       problems: result.full?.problems ?? [],
+      // Codes and schema paths only. What was removed is never carried.
+      warnings: result.full?.warnings ?? [],
       cost: {
         reportedSpendUsd: ledger.reportedSpendUsd,
         budgetedSpendUsd: ledger.budgetedSpendUsd,

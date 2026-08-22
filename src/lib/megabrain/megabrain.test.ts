@@ -1174,9 +1174,22 @@ describe("semantic honesty is enforced, not requested", () => {
     expect(evidence.length).toBeGreaterThan(0);
     expect(evidence.every((e) => e.verificationStatus === "not_reviewed")).toBe(true);
   });
-  it("rejects an actor given a personality with no supporting fact", async () => {
-    await expect(runCase({ account: "x" }, fixtureTransport({ inventedActor: true })))
-      .rejects.toThrow(/reportedWithoutFacts/);
+  it("strips a personality invented with no supporting fact, without killing the case", async () => {
+    // The guarantee is unchanged: invented psychology must never reach the
+    // analysis. What changed is the remedy. Sanitation removes the unsupported
+    // claims deterministically instead of destroying a complete, already-paid-for
+    // case file over them — see sanitize.ts.
+    const r = await runCase({ account: "x" }, fixtureTransport({ inventedActor: true }));
+    const director = r.analysis.actors.actors.find((a) => a.label === "Директор");
+    expect(director).toBeDefined();
+    expect(director!.goals).toHaveLength(0);
+    expect(director!.fears).toHaveLength(0);
+    expect(JSON.stringify(r.analysis.actors)).not.toContain("Сохранить технический талант");
+    expect(r.warnings.filter((w) => w.code === "UNSUPPORTED_ACTOR_CLAIM_REMOVED").length).toBeGreaterThanOrEqual(2);
+  });
+  it("still refuses a reported claim with no facts at the validator level", () => {
+    const bad = { actors: [{ label: "X", goals: [{ value: "g", basis: "reported", supportingFactIds: [] }], fears: [], resources: [], authority: { value: "unknown", basis: "unknown", supportingFactIds: [] }, dependencies: [], likelyReactions: [] }] };
+    expect(validateActors(bad, GOOD_ANALYSIS.frame).problems.some((p) => p.includes("reportedWithoutFacts"))).toBe(true);
   });
   it("accepts unknown for an actor barely mentioned", () => {
     const director = GOOD_ANALYSIS.actors.actors.find((a) => a.label === "Директор")!;
