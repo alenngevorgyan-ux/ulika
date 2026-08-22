@@ -3,7 +3,7 @@ import { BudgetExceededError, CostLedger, MODE_CAPS, type CaseMode } from "./cos
 import { modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
 import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
-import { parseJsonReply, type Transport } from "./transport";
+import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type Transport } from "./transport";
 import { checkLanguage, resolveLanguage } from "./language";
 import { capFor, ModeNotAvailable, MODES, type AnalysisMode } from "./analysisMode";
 import {
@@ -164,6 +164,30 @@ async function stage(
       retryNumber: attempt,
       reservedUsd: projectedUsd,
     });
+
+    /**
+     * Truncation is decided BEFORE parsing, and it ends the stage.
+     *
+     * Parsing a fragment can only produce two outcomes, and both are bad: null,
+     * which is indistinguishable from a model that wrote nonsense, or — because
+     * parseJsonReply falls back to the outermost braces — a SHORTER object that
+     * happens to close, which would then be validated and possibly accepted as
+     * a complete answer built from a cut-off one. Neither is worth finding out.
+     *
+     * The call above has already been recorded, so the charge for this attempt
+     * is accounted for. What does not happen is a second attempt: the prompt and
+     * the ceiling would be identical, so the overflow would be identical, and
+     * the only certain outcome is a second charge.
+     */
+    if (isTruncatedFinish(result.telemetry)) {
+      ledger.onValidation?.({ attemptId, stage: name, result: "truncated" });
+      throw new OutputTruncatedError(
+        name,
+        result.usage.outputTokens,
+        maxOutputTokens,
+        result.telemetry.finishReason ?? result.telemetry.nativeFinishReason
+      );
+    }
 
     const parsed = parseJsonReply(result.content);
     ledger.onValidation?.({ attemptId, stage: name, result: parsed !== null ? "ok" : "unparseable" });

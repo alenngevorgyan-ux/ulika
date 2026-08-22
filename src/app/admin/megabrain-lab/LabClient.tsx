@@ -28,14 +28,56 @@ interface ModelInfo {
   note: string;
 }
 
+/** Mirrors LabDiagnostics on the server. Every field is already allowlisted there. */
+interface Diagnostics {
+  error: string;
+  kind: string;
+  stage: string | null;
+  attemptId: string | null;
+  callsSent: number;
+  retries: number;
+  reportedSpendUsd: number;
+  hasUnknownCharges: boolean;
+  remainingUsd: number;
+  capUsd: number;
+  latencyMs: number;
+  httpStatus: number | null;
+  finishReason: string | null;
+  schemaPaths: string[];
+  problemCount: number;
+  recommendation: string;
+  calls?: CallRow[];
+}
+
+/**
+ * A failure the server did not classify — a 400 from the mode/model guards, or
+ * a transport-level failure that never reached the route.
+ *
+ * Shaped into the same object so the UI has one rendering path. `callsSent: 0`
+ * is the truthful value here: no run was started.
+ */
+function localFailure(kind: string, recommendation: string): Diagnostics {
+  return {
+    error: kind, kind, stage: null, attemptId: null, callsSent: 0, retries: 0,
+    reportedSpendUsd: 0, hasUnknownCharges: false, remainingUsd: 0, capUsd: 0,
+    latencyMs: 0, httpStatus: null, finishReason: null, schemaPaths: [],
+    problemCount: 0, recommendation,
+  };
+}
+
 interface CallRow {
   stage: string;
   model: string;
+  /** What the provider says it served. A mismatch is worth seeing. */
+  reportedModel: string | null;
   provider: string | null;
   inputTokens: number;
   outputTokens: number;
   actualCostUsd: number | null;
   latencyMs: number;
+  /** "stop" or "length" — the difference between a bad answer and a cut-off one. */
+  finishReason: string | null;
+  retryNumber: number;
 }
 
 export default function LabClient({ modes, models }: { modes: ModeInfo[]; models: ModelInfo[] }) {
@@ -46,7 +88,9 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
   const [mode, setMode] = useState("standard");
   const [modelChoice, setModelChoice] = useState("auto");
   const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The whole safe payload, not a string. The previous version kept only a
+  // message and dropped `kind` — the one field that named the failure.
+  const [error, setError] = useState<Diagnostics | null>(null);
   const [result, setResult] = useState<{
     rendered: string | null;
     light: Record<string, string> | null;
@@ -87,13 +131,24 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
       });
       const data = await res.json().catch(() => ({ error: "BAD_RESPONSE" }));
       if (!res.ok) {
-        // A code, never a provider message.
-        setError(String(data.error ?? res.status) + (data.detail ? `: ${data.detail}` : ""));
+        // The server sends a full diagnostic object for an engine failure and a
+        // bare code for the two guard rejections. Both render; neither carries
+        // a provider message.
+        setError(
+          typeof data.kind === "string"
+            ? (data as Diagnostics)
+            : localFailure(String(data.error ?? res.status), String(data.detail ?? "Запрос отклонён до запуска движка."))
+        );
       } else {
         setResult(data);
       }
     } catch (e) {
-      setError(e instanceof Error && e.name === "AbortError" ? "TIMEOUT" : "REQUEST_FAILED");
+      const aborted = e instanceof Error && e.name === "AbortError";
+      setError(
+        aborted
+          ? localFailure("TIMEOUT", "Клиент прервал запрос на 150 с. Прогон на сервере мог продолжаться — смотрите журнал.")
+          : localFailure("REQUEST_FAILED", "Ответ не получен. Проверьте, что dev-сервер жив.")
+      );
     } finally {
       clearTimeout(timeout);
       inFlight.current = false;
@@ -187,7 +242,65 @@ export default function LabClient({ modes, models }: { modes: ModeInfo[]; models
         {running ? "Считаю…" : `Запустить (${selected.label.ru})`}
       </button>
 
-      {error && <p className="text-sm" style={{ color: "var(--danger)" }}>Ошибка: {error}</p>}
+      {error && (
+        <section
+          className="text-sm rounded-md border p-4 space-y-2"
+          style={{ borderColor: "var(--danger)" }}
+        >
+          <div className="font-medium" style={{ color: "var(--danger)" }}>
+            {error.error} · {error.kind}
+            {error.stage && <> · стадия <b>{error.stage}</b></>}
+          </div>
+
+          <div className="text-xs text-muted">
+            вызовов отправлено: {error.callsSent} · ретраев: {error.retries}
+            {error.finishReason && <> · finish_reason: <b>{error.finishReason}</b></>}
+            {error.httpStatus !== null && <> · HTTP {error.httpStatus}</>}
+            {error.attemptId && <> · attempt {error.attemptId}</>}
+          </div>
+
+          <div className="text-xs text-muted">
+            списано провайдером ${error.reportedSpendUsd.toFixed(4)}
+            {error.capUsd > 0 && <> из ${error.capUsd.toFixed(2)} · осталось ${error.remainingUsd.toFixed(4)}</>}
+            {error.latencyMs > 0 && <> · {(error.latencyMs / 1000).toFixed(1)} с</>}
+            {error.hasUnknownCharges && (
+              <b style={{ color: "var(--danger)" }}> · есть вызовы без подтверждённой суммы</b>
+            )}
+          </div>
+
+          {error.schemaPaths.length > 0 && (
+            <div className="text-xs">
+              <div className="text-muted">
+                нарушений: {error.problemCount}
+                {error.problemCount > error.schemaPaths.length && ` (показаны первые ${error.schemaPaths.length})`}
+              </div>
+              <ul className="mt-1 font-mono">
+                {error.schemaPaths.map((p) => (
+                  <li key={p}>{p}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <p className="text-xs">{error.recommendation}</p>
+
+          {/* Engine metadata survives a render failure: it was paid for. */}
+          {error.calls && error.calls.length > 0 && (
+            <table className="w-full text-xs">
+              <tbody>
+                {error.calls.map((c, i) => (
+                  <tr key={i}>
+                    <td>{c.stage}</td>
+                    <td>{c.reportedModel ?? c.model}</td>
+                    <td>{c.outputTokens} tok</td>
+                    <td>${(c.actualCostUsd ?? 0).toFixed(4)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
 
       {result && (
         <section className="space-y-4">

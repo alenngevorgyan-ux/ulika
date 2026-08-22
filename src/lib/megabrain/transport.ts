@@ -49,6 +49,62 @@ export interface ResponseTelemetry {
   serviceTier: string | null;
   /** Per-attempt routing outcomes: provider and a short status, nothing else. */
   routingAttempts: { provider: string; status: string }[];
+  /**
+   * Why the model stopped. "stop" is a finished answer; "length" means WE cut
+   * it off at max_tokens and whatever came back is a fragment.
+   *
+   * Read as an enum-like token through safeToken, never as free text: some
+   * providers put a sentence in the native field.
+   */
+  finishReason: string | null;
+  /** The provider's own wording for the same thing, when it is short enough. */
+  nativeFinishReason: string | null;
+}
+
+/**
+ * Finish reasons that mean "the output is a fragment", across providers.
+ *
+ * Matched case-insensitively because Google returns MAX_TOKENS and OpenAI
+ * returns length for the same event.
+ */
+const TRUNCATION_FINISH_REASONS = new Set(["length", "max_tokens", "model_length", "max_output_tokens"]);
+
+/** True when either finish reason says the answer was cut off at the ceiling. */
+export function isTruncatedFinish(t: Pick<ResponseTelemetry, "finishReason" | "nativeFinishReason">): boolean {
+  return [t.finishReason, t.nativeFinishReason].some(
+    (r) => typeof r === "string" && TRUNCATION_FINISH_REASONS.has(r.trim().toLowerCase())
+  );
+}
+
+/**
+ * The model was cut off at our own max_tokens ceiling.
+ *
+ * A separate class rather than a parse failure, because the two need opposite
+ * handling. Malformed JSON from a model that FINISHED is worth one more attempt:
+ * the next sample may be well-formed. A fragment is not — the same prompt under
+ * the same ceiling produces the same overflow, so a retry is a second charge
+ * bought in exchange for the identical failure. That retry is precisely what
+ * turned an unreadable answer into two unreadable answers, twice the price, and
+ * a bare ENGINE_FAILED on screen.
+ *
+ * Carries the stage because the transport does not know it: the stage name is
+ * attached by the engine, which is also where the call has already been
+ * recorded, so the charge for the truncated attempt is never lost.
+ */
+export class OutputTruncatedError extends Error {
+  readonly code = "OUTPUT_TRUNCATED";
+  constructor(
+    readonly stage: string,
+    readonly outputTokens: number,
+    readonly maxOutputTokens: number,
+    readonly finishReason: string | null
+  ) {
+    super(
+      `Stage "${stage}" was cut off at the ${maxOutputTokens}-token ceiling ` +
+        `(${outputTokens} output tokens, finish_reason=${finishReason ?? "unknown"}).`
+    );
+    this.name = "OutputTruncatedError";
+  }
 }
 
 export interface CompletionResult {
@@ -199,6 +255,7 @@ function safeToken(v: unknown, max = 60): string | null {
 export function readTelemetry(raw: unknown): ResponseTelemetry {
   const d = (raw ?? {}) as Record<string, unknown>;
   const meta = (d.metadata ?? {}) as Record<string, unknown>;
+  const choice = (Array.isArray(d.choices) ? d.choices[0] : null) as Record<string, unknown> | null;
 
   const attemptsRaw = Array.isArray(meta.routing_attempts)
     ? (meta.routing_attempts as unknown[])
@@ -222,6 +279,10 @@ export function readTelemetry(raw: unknown): ResponseTelemetry {
     selectedProvider: safeToken(d.provider ?? meta.provider ?? meta.provider_name),
     serviceTier: safeToken(d.service_tier ?? meta.service_tier, 40),
     routingAttempts,
+    // Bounded to 40 chars: a provider that answers with prose here gets dropped
+    // rather than trimmed, same rule as every other field in this allowlist.
+    finishReason: safeToken(choice?.finish_reason, 40),
+    nativeFinishReason: safeToken(choice?.native_finish_reason, 40),
   };
 }
 

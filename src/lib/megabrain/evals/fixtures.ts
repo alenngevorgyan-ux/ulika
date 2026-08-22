@@ -349,6 +349,12 @@ interface FixtureOptions {
   emptyFrame?: boolean;
   /** Force one unparseable reply from the strategy stage, to exercise a retry. */
   strategiseGarbageFirst?: boolean;
+  /**
+   * Cut a stage's reply off at the token ceiling: finish_reason "length" and a
+   * body that is real JSON up to the point it stops. Reproduces the failure
+   * mode that produced an undiagnosable ENGINE_FAILED on the first complex case.
+   */
+  truncateStage?: "extract" | "analyse" | "strategise";
   /** Answer the merged two-call ablation schema. */
   combined?: boolean;
   /** Try to smuggle a user claim into documentedFacts. */
@@ -446,7 +452,21 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       selectedProvider: req.modelSlug.startsWith("x-ai") ? "xAI" : "Google",
       serviceTier: "default",
       routingAttempts: [{ provider: "SpaceXAI", status: "ok" }],
+      // A finished answer unless a test asks for a cut-off one.
+      finishReason: truncatedHere() ? "length" : "stop",
+      nativeFinishReason: null,
     });
+
+    /** True when THIS request is the stage the test wants truncated. */
+    function truncatedHere(): boolean {
+      if (!opts.truncateStage) return false;
+      const n = req.jsonSchema?.name;
+      return (
+        (opts.truncateStage === "extract" && n === "case_extraction") ||
+        (opts.truncateStage === "analyse" && n === "case_analysis") ||
+        (opts.truncateStage === "strategise" && n === "case_plan")
+      );
+    }
     // Returns CompletionResult explicitly: inferring the generic from the
     // partial left telemetry off the inferred type and the compiler was right
     // to object.
@@ -455,6 +475,17 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       telemetry: tel(),
     });
     if (opts.alwaysGarbage) return withModel(tamper({ content: "not json", usage: usage(100, 10), latencyMs: 5 }));
+
+    // A fragment, not garbage: valid JSON that simply stops. The engine must
+    // refuse it on finish_reason alone, without trying to parse it — a truncated
+    // object can still close on an inner brace and validate as a smaller answer.
+    if (truncatedHere()) {
+      return withModel(tamper({
+        content: '{"frame":{"reportedFacts":[{"id":"f1","text":"…"},{"id":"f2","te',
+        usage: usage(900, 1600, 0.0009),
+        latencyMs: 900,
+      }));
+    }
 
     // Behave like a real model: answer in the language the prompt demands.
     // Without this the fixture always replied in Russian and the language gate

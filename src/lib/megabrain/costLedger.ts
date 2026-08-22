@@ -73,6 +73,13 @@ export interface LedgerEntry {
   /** Schema validation outcome for this stage's output, once it is known. */
   validationResult: "ok" | "invalid" | "unparseable" | null;
   /**
+   * Why the model stopped. Recorded per call because "length" is the difference
+   * between a model that wrote nonsense and a ceiling we set too low, and the
+   * journal is where that question gets settled after the fact.
+   */
+  finishReason: string | null;
+  nativeFinishReason: string | null;
+  /**
    * Where the figure came from.
    *   provider   — the provider reported a charge.
    *   unreported — a call completed and was presumably billed, amount unknown.
@@ -103,6 +110,8 @@ export const LEDGER_FIELDS: readonly (keyof LedgerEntry)[] = [
   "serviceTier",
   "routingAttempts",
   "validationResult",
+  "finishReason",
+  "nativeFinishReason",
   "provider",
   "model",
   "stage",
@@ -229,7 +238,11 @@ export class CostLedger {
    * Reported as its own event rather than mutating a recorded entry: a journal
    * line that changes after being written is not a journal line.
    */
-  onValidation?: (v: { attemptId: string; stage: string; result: "ok" | "invalid" | "unparseable" }) => void;
+  onValidation?: (v: {
+    attemptId: string;
+    stage: string;
+    result: "ok" | "invalid" | "unparseable" | "truncated";
+  }) => void;
 
   constructor(
     readonly mode: CaseMode,
@@ -342,6 +355,8 @@ export class CostLedger {
         serviceTier: null,
         routingAttempts: [],
         validationResult: null,
+      finishReason: null,
+      nativeFinishReason: null,
         provider: spec.provider,
         model: spec.slug,
         stage,
@@ -421,6 +436,8 @@ export class CostLedger {
       serviceTier: t?.serviceTier ?? null,
       routingAttempts: t?.routingAttempts ?? [],
       validationResult: null,
+      finishReason: t?.finishReason ?? null,
+      nativeFinishReason: t?.nativeFinishReason ?? null,
       provider: spec.provider,
       model: spec.slug,
       stage,

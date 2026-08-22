@@ -1313,7 +1313,8 @@ describe("telemetry is a strict allowlist", () => {
       error: { message: echo },
     });
     expect(Object.keys(t).sort()).toEqual([
-      "reportedModel", "responseId", "routingAttempts", "selectedProvider", "serviceTier",
+      "finishReason", "nativeFinishReason", "reportedModel", "responseId", "routingAttempts",
+      "selectedProvider", "serviceTier",
     ]);
     expect(JSON.stringify(t)).not.toContain(echo);
   });
@@ -1726,7 +1727,11 @@ describe("the lab is closed by default and cannot be opened from the client", ()
 
   it("returns codes from the route, never a provider body", () => {
     const route = readFileSync(join(process.cwd(), "src/app/api/megabrain-lab/route.ts"), "utf8");
-    expect(route).toContain('error: "ENGINE_FAILED"');
+    // The failure payload is built in exactly one place now, so the guard
+    // follows it there rather than pinning a string the route no longer holds.
+    expect(route).toContain("buildDiagnostics(e,");
+    const diagnostics = readFileSync(join(process.cwd(), "src/lib/megabrain/labDiagnostics.ts"), "utf8");
+    expect(diagnostics).toContain('error: "ENGINE_FAILED"');
     // 404 rather than 403 for a disabled surface.
     expect(route).toContain('new NextResponse("Not found", { status: 404 })');
     // No artifact is written for a live case.
