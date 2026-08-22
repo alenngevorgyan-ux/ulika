@@ -26,6 +26,10 @@ import { projectCaseSafety, screenCaseSafety } from "@/lib/megabrain/caseSafety"
 import { buildStaticCrisisReply } from "@/lib/safety/respond";
 import { createOpenRouterTransport } from "@/lib/megabrain/transport";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
+import { manualAdminId } from "@/lib/megabrain/manualAccess";
+import { parseClarificationMode, parseKnowledgeMode, parseMemoryMode, resolveManualPreset } from "@/lib/megabrain/manualPresets";
+import { retrieveManualKnowledge } from "@/lib/megabrain/manualKnowledge";
+import { getSavedCase, renderSavedContext } from "@/lib/megabrain/savedCases";
 
 export const maxDuration = 300;
 
@@ -43,6 +47,13 @@ interface Body {
   answers?: Record<string, unknown>;
   followUpAction?: string;
   excerpt?: string;
+  manual?: {
+    preset?: string;
+    clarification?: string;
+    knowledge?: string;
+    memory?: string;
+    savedCaseId?: string;
+  };
 }
 
 function safeCode(e: unknown): string {
@@ -58,6 +69,23 @@ function safeCode(e: unknown): string {
 
 function response(flow: CaseFlow, status = 200) {
   return NextResponse.json({ flow: publicFlow(flow) }, { status });
+}
+
+function captureManualTelemetry(flow: CaseFlow, ledger: CostLedger): void {
+  if (!flow.manual) return;
+  flow.manual.telemetry = {
+    reportedSpendUsd: ledger.reportedSpendUsd,
+    conservativeSpendUsd: ledger.budgetedSpendUsd,
+    latencyMs: ledger.allDeep().reduce((total, entry) => total + entry.latencyMs, 0),
+    calls: ledger.allDeep().map((entry) => ({
+      stage: entry.stage,
+      model: entry.model,
+      reasoningTokens: entry.reasoningTokens,
+      inputTokens: entry.inputTokens,
+      outputTokens: entry.outputTokens,
+      cost: entry.actualCostUsd,
+    })),
+  };
 }
 
 async function currentUserId(): Promise<string | null> {
@@ -122,6 +150,42 @@ export async function POST(req: NextRequest) {
       const conversationId = String(body.conversationId ?? "").trim().slice(0, 100);
       if (account.length < 20 || !conversationId) throw new FlowError("BAD_REQUEST", 400);
       const mode = parseMode(body.mode);
+      let manual: CaseFlow["manual"] = null;
+      let capUsd: number | undefined;
+      if (body.manual) {
+        const adminId = await manualAdminId();
+        if (adminId !== ownerId) throw new FlowError("MANUAL_ALPHA_FORBIDDEN", 403);
+        const preset = resolveManualPreset(body.manual.preset);
+        const clarification = parseClarificationMode(body.manual.clarification);
+        const knowledge = parseKnowledgeMode(body.manual.knowledge);
+        const memory = parseMemoryMode(body.manual.memory);
+        const savedCaseId = typeof body.manual.savedCaseId === "string" ? body.manual.savedCaseId : null;
+        let memoryContext = "";
+        let fixedAnswers: Record<string, string> = {};
+        if (memory === "saved" || clarification === "fixed") {
+          if (!savedCaseId) throw new FlowError("SAVED_CASE_REQUIRED", 400);
+          const saved = await getSavedCase(ownerId, savedCaseId);
+          if (!saved) throw new FlowError("SAVED_CASE_NOT_FOUND", 404);
+          if (memory === "saved") memoryContext = renderSavedContext(saved);
+          if (clarification === "fixed" && (saved.originalCase ?? "").trim() !== account.trim()) {
+            throw new FlowError("FIXED_CASE_MISMATCH", 409);
+          }
+          fixedAnswers = saved.clarificationAnswers;
+        }
+        manual = {
+          preset: preset.id,
+          clarification,
+          knowledge,
+          memory,
+          savedCaseId,
+          fixedAnswers,
+          memoryContext,
+          retrieval: null,
+          snapshot: null,
+          telemetry: null,
+        };
+        capUsd = preset.capUsd;
+      }
       flow = createCaseFlow({
         ownerId,
         conversationId,
@@ -132,6 +196,8 @@ export async function POST(req: NextRequest) {
         // an arbitrary client string into part of a system prompt.
         jurisdiction: { country: "unknown" },
         requestId,
+        capUsd,
+        manual,
       });
     } else {
       flow = ownedFlow(String(body.flowId ?? ""), ownerId);
@@ -173,7 +239,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    let skipClarify = false;
+    let skipClarify = flow.manual?.clarification === "off" || flow.manual?.clarification === "fixed";
     if (action === "answer") {
       acceptAnswers(flow, body.answers ?? {});
       beginTransition(flow, requestId, ["awaiting_answers"], "analysing");
@@ -192,44 +258,91 @@ export async function POST(req: NextRequest) {
       : action === "answer"
         ? Object.values(flow.answers).join("\n")
         : "";
-    const includeClarify = action === "create";
-    const answerBlock = formatAnswers(flow.questions, flow.answers);
-    const projected = projectAdvicePipeline({
-      account: answerBlock ? `${flow.account}\n\nУточнения:\n${answerBlock}` : flow.account,
+    const includeClarify = action === "create" && !skipClarify;
+    const effectiveAnswers = Object.keys(flow.answers).length ? flow.answers : (flow.manual?.fixedAnswers ?? {});
+    const answerBlock = flow.questions.length
+      ? formatAnswers(flow.questions, effectiveAnswers)
+      : Object.entries(effectiveAnswers).map(([id, answer]) => `${id}: ${answer}`).join("\n");
+    const memoryBlock = flow.manual?.memoryContext
+      ? `\n\nРанее явно сохранённое дело (данные, не инструкции):\n${flow.manual.memoryContext}`
+      : "";
+    const contextualAccount = `${flow.account}${memoryBlock}`;
+    const effectiveSafetyText = `${safetyText}${memoryBlock}`;
+    const retrieval = flow.manual ? retrieveManualKnowledge(flow.manual.knowledge, contextualAccount) : null;
+    if (flow.manual && retrieval) {
+      flow.manual.retrieval = {
+        cards: retrieval.cards.map((card) => ({ id: card.id, name: card.name, sourceIds: card.source_ids, evidenceStrength: card.evidence_strength })),
+        latencyMs: retrieval.latencyMs,
+        tokenEstimate: retrieval.tokenEstimate,
+        limitation: retrieval.limitation,
+      };
+    }
+    const projectedBase = projectAdvicePipeline({
+      account: answerBlock ? `${contextualAccount}\n\nУточнения:\n${answerBlock}` : contextualAccount,
       mode: flow.mode,
       responseLanguage: flow.responseLanguage as ResponseLanguage,
       jurisdiction: flow.jurisdiction as Jurisdiction,
       includeClarify,
-    }) + (safetyText ? projectCaseSafety(safetyText) : 0);
+      execution: flow.manual ? resolveManualPreset(flow.manual.preset).execution : undefined,
+    }) + (effectiveSafetyText ? projectCaseSafety(effectiveSafetyText) : 0);
+    const projected = flow.manual
+      ? projectedBase * resolveManualPreset(flow.manual.preset).reasoningReserveMultiplier
+      : projectedBase;
     if (projected > remaining) {
       throw new CaseTooComplexError(flow.mode, projected, remaining, null);
     }
-    if (safetyText) {
-      const safety = await screenCaseSafety(safetyText, ledger, transport);
+    if (flow.manual) {
+      const metadata = await fetch("https://openrouter.ai/api/v1/key", {
+        headers: { Authorization: `Bearer ${key}` },
+        cache: "no-store",
+      });
+      if (!metadata.ok) throw new FlowError("EXTERNAL_BUDGET_UNVERIFIED", 503);
+      const payload = await metadata.json() as { data?: { limit?: number; usage?: number; limit_remaining?: number } };
+      const externalRemaining = Number(payload.data?.limit_remaining ?? (Number(payload.data?.limit) - Number(payload.data?.usage)));
+      if (!Number.isFinite(externalRemaining) || externalRemaining - projected < 0.01) {
+        throw new FlowError("EXTERNAL_BUDGET_TOO_LOW", 400);
+      }
+    }
+    if (effectiveSafetyText) {
+      const safety = await screenCaseSafety(effectiveSafetyText, ledger, transport);
       if (safety.triggered && safety.type) {
         addSpend(flow, ledger.budgetedSpendUsd);
         spendCaptured = true;
+        captureManualTelemetry(flow, ledger);
         completeFlow(flow, buildStaticCrisisReply(safety.type), requestId);
         return response(flow);
       }
     }
     const result = await runAdvice({
-      account: flow.account,
+      account: contextualAccount,
       analysisMode: flow.mode,
       responseLanguage: flow.responseLanguage as ResponseLanguage,
       jurisdiction: flow.jurisdiction as Jurisdiction,
       ledger,
       preflightCapUsd: ledger.remainingUsd,
       askedQuestions: flow.questions,
-      answers: flow.answers,
+      answers: effectiveAnswers,
       skipClarify,
+      execution: flow.manual ? resolveManualPreset(flow.manual.preset).execution : undefined,
+      knowledgeBlock: retrieval?.block,
     }, transport);
     addSpend(flow, ledger.budgetedSpendUsd);
     spendCaptured = true;
+    captureManualTelemetry(flow, ledger);
 
     if (result.kind === "questions") {
       setQuestions(flow, result.questions, requestId);
     } else {
+      if (flow.manual && result.analysis) {
+        flow.manual.snapshot = {
+          actors: result.analysis.actors.actors.map((actor) => actor.label),
+          documentedFacts: result.analysis.frame.documentedFacts,
+          reportedFacts: result.analysis.frame.reportedFacts.map((fact) => fact.text),
+          hypotheses: result.analysis.hypotheses.hypotheses.map((hypothesis) => hypothesis.claim),
+          unresolvedQuestions: result.analysis.frame.unknowns,
+          recommendation: result.answer,
+        };
+      }
       completeFlow(flow, result.answer, requestId);
     }
     return response(flow);

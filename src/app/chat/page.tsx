@@ -7,6 +7,7 @@ import { ModeIndicator } from "@/components/chat/primitives";
 import { parseBlocks } from "@/lib/mentalist/parseBlocks";
 import { useCaseState } from "@/lib/interaction/useCaseState";
 import { useT } from "@/lib/i18n/useT";
+import ManualAlphaPanel, { type ManualAlphaSettings } from "@/components/chat/ManualAlphaPanel";
 
 interface Message {
   role: "user" | "assistant";
@@ -24,6 +25,15 @@ interface CaseFlowView {
   answer: string | null;
   followUps: { action: string; answer: string }[];
   safeError: string | null;
+  budgetedSpendUsd?: number;
+  manual?: {
+    retrieval?: {
+      cards: { id: string; name: string; sourceIds: string[]; evidenceStrength: string }[];
+      latencyMs: number;
+      tokenEstimate: number;
+      limitation: string | null;
+    } | null;
+  } | null;
 }
 
 interface Conversation {
@@ -71,6 +81,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [caseAnswers, setCaseAnswers] = useState<Record<string, string>>({});
   const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({});
+  const [manualSettings, setManualSettings] = useState<ManualAlphaSettings | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const sendInFlight = useRef(false);
   const { t, locale } = useT();
@@ -194,6 +205,7 @@ export default function ChatPage() {
               mode: selectedMode,
               responseLanguage: locale,
               jurisdiction: { country: "unknown" },
+              ...(manualSettings ? { manual: manualSettings } : {}),
             }),
       });
       const data = await res.json();
@@ -355,6 +367,15 @@ export default function ChatPage() {
         <p className="text-xs text-muted mb-6">
           Twenty years reading people for a living. Now teaching you how it&apos;s done.
         </p>
+
+        <ManualAlphaPanel
+          flow={active?.caseFlow ?? null}
+          originalCase={[...(active?.messages ?? [])].reverse().find((m) => m.role === "user" && m.source !== "megabrain")?.content ?? ""}
+          messages={(active?.messages ?? []).map(({ role, content }) => ({ role, content }))}
+          questions={active?.caseFlow?.questions ?? []}
+          answers={Object.fromEntries((active?.caseFlow?.questions ?? []).map((q) => [q.id, customAnswers[q.id] || caseAnswers[q.id] || ""]))}
+          onSettings={setManualSettings}
+        />
 
         <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-1">
           {active?.messages.map((m, i) => (
