@@ -113,7 +113,7 @@ export interface LabDiagnostics {
 /** One sentence per kind, chosen from a table. Never built from the exception. */
 const RECOMMENDATION: Record<LabErrorKind, string> = {
   OUTPUT_TRUNCATED:
-    "Ответ обрезан нашим потолком max_tokens, а не отказом модели. Поднимать потолок этой стадии — осознанное решение по цене, не автоматическое.",
+    "Ответ обрезан нашим потолком max_tokens, а не отказом модели. Повтор с тем же потолком не выполнялся: он купил бы второе списание и тот же обрыв. Кейс такого размера — кандидат на режим «Сильный ход»; потолок не повышается автоматически.",
   STAGE_REJECTED:
     "Модель ответила, но структура не прошла валидатор. Смотрите schema paths: это либо недостающее поле в промпте, либо слишком жёсткое правило.",
   LANGUAGE_MISMATCH:

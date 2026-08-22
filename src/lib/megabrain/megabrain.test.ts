@@ -214,7 +214,12 @@ describe("a benchmark budget never relaxes the engine budget", () => {
         // for one case to approach $0.10 at all — its whole run reserves under
         // $0.04. Each charge still sits under its own stage reservation, so the
         // run is stopped by the envelope and not by the overcharge check.
-        { account: "x", mode: "standard", configurationId: "cheap-extract-sonnet", ledger: benchmark },
+        // preflightCapUsd is raised past the projection ON PURPOSE. With extract
+        // at a 3000-token ceiling this expensive configuration projects to
+        // $0.107 in the worst case, so the complexity preflight would refuse it
+        // at the door — correctly, but this test is about what the NESTED
+        // envelopes do mid-run, and that guard has to be reachable to be tested.
+        { account: "x", mode: "standard", configurationId: "cheap-extract-sonnet", ledger: benchmark, preflightCapUsd: 0.15 },
         fixtureTransport({
           strategiseGarbageFirst: true,
           stageCosts: { extract: 0.003, analyse: 0.03, strategise: 0.045 },

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { BudgetExceededError, CostLedger, MODE_CAPS, type CaseMode } from "./costLedger";
-import { modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
+import { BudgetExceededError, CostLedger, MODE_CAPS, RESERVATION_SAFETY_MARGIN, type CaseMode } from "./costLedger";
+import { costOf, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
 import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
 import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type Transport } from "./transport";
@@ -48,6 +48,26 @@ export interface CaseInput {
   /** How much analysis to buy. See analysisMode.ts. */
   analysisMode?: AnalysisMode;
   /**
+   * The cap the COMPLEXITY preflight measures against. Defaults to the engine's
+   * own allowance for the mode.
+   *
+   * Separate from the ledger's cap on purpose, because the two answer different
+   * questions and must not be allowed to impersonate each other:
+   *
+   *   "this case does not fit Standard"     — a fact about the case and the
+   *                                           product tier, worth refusing over
+   *                                           before anything is spent;
+   *   "this envelope has $0.01 left"        — a fact about a shared budget part
+   *                                           way through a benchmark run.
+   *
+   * Telling somebody their situation is too complex when the truth is that a
+   * benchmark command is nearly out of money would be a false statement about
+   * their case. So a squeezed envelope stays the per-stage guard's business,
+   * and only a caller that knows the real product cap — the Lab passes
+   * capFor(mode) — arms the preflight with it.
+   */
+  preflightCapUsd?: number;
+  /**
    * Shared ledger. When a caller passes one — the benchmark always does — every
    * call in this case reserves against the SAME budget as every other case and
    * every judge call.
@@ -70,7 +90,26 @@ export interface EngineResult {
 
 /** Output ceilings per stage. Reserved against, not hoped for. */
 export const MAX_OUTPUT_TOKENS = {
-  extract: 1600,
+  /**
+   * 3000, raised from 1600 after a proven truncation.
+   *
+   * The evidence, not a guess: a real complex case came back with
+   * finish_reason "length" at exactly 1600 output tokens, and the frozen SIMPLE
+   * case already used 1387 of them — 87% of the old ceiling before anything
+   * hard was asked of it.
+   *
+   * Why 3000 and not more. The compaction rules in extractPrompt plus the
+   * maxItems in EXTRACT_SCHEMA bound a maximal CaseFrame at roughly 2550 output
+   * tokens (12 facts, 6 evidence, 6+6+6 lists, 4 actors x 3 claims per field).
+   * 3000 clears that structural worst case by ~18% and clears the expected
+   * output for a long case, around 2200, by ~36%.
+   *
+   * Why not more than that: this ceiling is reserved BEFORE the call and it is
+   * charged against the same $0.05 Standard cap as the two stages after it,
+   * whose inputs grow with whatever this stage emits. See projectCasePipeline —
+   * the worst case for all three now lands at $0.0417.
+   */
+  extract: 3000,
   analyse: 2000,
   strategise: 3000,
   /**
@@ -84,6 +123,30 @@ export const MAX_OUTPUT_TOKENS = {
   /** The critic returns a whole revised plan, so it needs the same room. */
   critic: 3000,
 } as const;
+
+/**
+ * The whole pipeline cannot fit the mode's cap, established BEFORE any request.
+ *
+ * Distinct from BudgetExceededError, which fires mid-run when the next stage
+ * would breach the cap — by then extract has been paid for and the user has a
+ * charge and no answer. This one refuses at the door: no partial pipeline, no
+ * spend, and a named mode that would fit instead.
+ */
+export class CaseTooComplexError extends Error {
+  readonly code = "CASE_TOO_COMPLEX_FOR_STANDARD";
+  constructor(
+    readonly mode: string,
+    readonly projectedUsd: number,
+    readonly capUsd: number,
+    readonly suggestedMode: string | null
+  ) {
+    super(
+      `A case this size projects to $${projectedUsd.toFixed(4)}, over the ` +
+        `$${capUsd.toFixed(2)} cap for ${mode}.`
+    );
+    this.name = "CaseTooComplexError";
+  }
+}
 
 export class StageRejectedError extends Error {
   constructor(readonly stage: string, readonly problems: string[]) {
@@ -115,6 +178,78 @@ function reportValidation(
 function requireOk(stage: string, results: { ok: boolean; problems: string[] }[]): void {
   const problems = results.filter((r) => !r.ok).flatMap((r) => r.problems);
   if (problems.length) throw new StageRejectedError(stage, problems);
+}
+
+/**
+ * What the whole case would cost in the worst case, computed BEFORE anything is
+ * sent.
+ *
+ * Uses the same arithmetic as CostLedger.reserve — the model's price table, the
+ * ceiling actually sent, and the same safety margin — so the preflight and the
+ * per-stage guard cannot disagree. A projection that used a friendlier formula
+ * would wave through cases the first reservation then refuses, after extract
+ * has already been paid for.
+ *
+ * The downstream inputs are modelled from the CEILINGS, not from a hope about
+ * typical length: everything extract emits is read again by analyse, and both
+ * are read again by strategise. That coupling is why raising one ceiling is a
+ * budget decision for all three stages rather than a local change.
+ */
+export function projectCasePipeline(p: {
+  account: string;
+  systems: { extract: string; analyse: string; strategise: string };
+  specs: {
+    extract: ReturnType<typeof modelFor>;
+    analyse: ReturnType<typeof modelFor>;
+    strategise: ReturnType<typeof modelFor>;
+  };
+  /** Project the pipeline that will actually run, not the one usually shipped. */
+  pipeline?: "three-stage" | "two-stage";
+}): { perStage: { stage: string; inputTokens: number; maxOutputTokens: number; usd: number }[]; totalUsd: number } {
+  const t = estimateTokens;
+  const reserved = (spec: ReturnType<typeof modelFor>, inputTokens: number, maxOut: number) =>
+    costOf(spec, inputTokens, maxOut) * RESERVATION_SAFETY_MARGIN;
+
+  const extractIn = t(p.systems.extract + p.account);
+  // The frame and actor map arrive as JSON on the next prompt; their worst case
+  // is exactly what extract was allowed to write.
+  const analyseIn = t(p.systems.analyse) + MAX_OUTPUT_TOKENS.extract;
+  const strategiseIn = t(p.systems.strategise) + MAX_OUTPUT_TOKENS.extract + MAX_OUTPUT_TOKENS.analyse;
+
+  const extract = {
+    stage: "extract",
+    inputTokens: extractIn,
+    maxOutputTokens: MAX_OUTPUT_TOKENS.extract,
+    usd: reserved(p.specs.extract, extractIn, MAX_OUTPUT_TOKENS.extract),
+  };
+
+  // The ablation merges analyse and strategise into one call, so projecting
+  // three would refuse cases it can in fact afford.
+  const perStage =
+    p.pipeline === "two-stage"
+      ? [
+          extract,
+          {
+            stage: "strategise",
+            inputTokens: t(p.systems.strategise) + MAX_OUTPUT_TOKENS.extract,
+            maxOutputTokens: MAX_OUTPUT_TOKENS.strategise,
+            usd: reserved(p.specs.strategise, t(p.systems.strategise) + MAX_OUTPUT_TOKENS.extract, MAX_OUTPUT_TOKENS.strategise),
+          },
+        ]
+      : [
+          extract,
+          { stage: "analyse", inputTokens: analyseIn, maxOutputTokens: MAX_OUTPUT_TOKENS.analyse, usd: reserved(p.specs.analyse, analyseIn, MAX_OUTPUT_TOKENS.analyse) },
+          { stage: "strategise", inputTokens: strategiseIn, maxOutputTokens: MAX_OUTPUT_TOKENS.strategise, usd: reserved(p.specs.strategise, strategiseIn, MAX_OUTPUT_TOKENS.strategise) },
+        ];
+  return { perStage, totalUsd: perStage.reduce((n, x) => n + x.usd, 0) };
+}
+
+/** The cheapest available mode whose cap covers this projection, if any. */
+function modeThatWouldFit(projectedUsd: number, current: string): string | null {
+  const fits = (Object.values(MODES) as { id: string; capUsd: number; available: boolean }[])
+    .filter((m) => m.available && m.id !== current && m.capUsd >= projectedUsd)
+    .sort((a, b) => a.capUsd - b.capUsd);
+  return fits[0]?.id ?? null;
 }
 
 /** One retry, and only for unparseable JSON. Never for a refusal or a timeout. */
@@ -274,6 +409,43 @@ export async function runCase(
 
   // ---- stage 1: extraction, on the cheap model
   const extractSpec = modelFor(configuration, "extract");
+
+  /**
+   * Refuse an oversized case at the door rather than halfway through it.
+   *
+   * The per-stage reservation already stops a breach, but it stops it AFTER
+   * extract has been sent and billed — the user ends up with a charge, no
+   * answer, and a budget error that names a stage they never saw. Projecting
+   * all three stages first turns that into a refusal that costs nothing and
+   * names a mode that would actually fit.
+   *
+   * Only for the real pipeline: Light has its own single call and its own
+   * $0.02 ceiling, and must not be priced against a three-stage projection.
+   */
+  const projection = projectCasePipeline({
+    account: input.account,
+    systems: {
+      extract: extractPrompt(sentinel, language, jurisdiction),
+      analyse: analysePrompt(sentinel, language, jurisdiction),
+      strategise: strategisePrompt(sentinel, language, jurisdiction),
+    },
+    specs: {
+      extract: extractSpec,
+      analyse: modelFor(configuration, "analyse"),
+      strategise: modelFor(configuration, "strategise"),
+    },
+    pipeline: configuration.pipeline === "two-stage" ? "two-stage" : "three-stage",
+  });
+  const preflightCap = input.preflightCapUsd ?? MODE_CAPS[mode];
+  if (projection.totalUsd > preflightCap) {
+    throw new CaseTooComplexError(
+      mode,
+      projection.totalUsd,
+      preflightCap,
+      modeThatWouldFit(projection.totalUsd, mode)
+    );
+  }
+
   const rawExtract = (await stage(
     transport,
     ledger,

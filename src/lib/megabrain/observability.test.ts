@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCase, renderAnalysis } from "./engine";
+import { runCase, renderAnalysis, MAX_OUTPUT_TOKENS } from "./engine";
 import { CostLedger } from "./costLedger";
 import { OutputTruncatedError, ProviderHttpError, isTruncatedFinish, readTelemetry, type Transport } from "./transport";
 import { RunRecorder, describeFailure } from "./runRecorder";
@@ -38,7 +38,7 @@ describe("truncation is terminal, named and paid for exactly once", () => {
     // overflow identically, so a retry buys a second charge and nothing else.
     expect(calls.n).toBe(1);
     expect((err as OutputTruncatedError).stage).toBe("extract");
-    expect((err as OutputTruncatedError).maxOutputTokens).toBe(1600);
+    expect((err as OutputTruncatedError).maxOutputTokens).toBe(MAX_OUTPUT_TOKENS.extract);
     expect((err as OutputTruncatedError).finishReason).toBe("length");
   });
 

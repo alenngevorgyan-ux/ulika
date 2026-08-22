@@ -1,4 +1,5 @@
 import { languageDirective } from "./language";
+import { EXTRACT_LIMITS } from "./jsonSchemas";
 import type { Jurisdiction, ResolvedLanguage } from "./schemas";
 
 /**
@@ -130,6 +131,25 @@ depend on finding it out. "Not enough information yet" is a real answer and is
 often the correct first move.
 `.trim();
 
+/**
+ * States the schema's own maxItems in prose.
+ *
+ * Read from EXTRACT_LIMITS rather than typed out, so the prompt cannot drift
+ * away from the ceilings the provider is actually decoding against — a model
+ * told "up to 15" while the schema stops it at 12 spends tokens planning for
+ * three entries it will never be allowed to emit.
+ */
+function extractLimitNote(): string {
+  const L = EXTRACT_LIMITS;
+  return (
+    `Hard ceilings: at most ${L.reportedFacts} reportedFacts, ` +
+    `${L.interpretations} interpretations, ${L.unknowns} unknowns, ` +
+    `${L.constraints} constraints, ${L.reportedEvidenceAvailable} evidence items, ` +
+    `${L.actors} actors, and ${L.claimsPerActorField} entries in each actor claim list. ` +
+    `Keep the most load-bearing ones; do not pad to reach a limit.`
+  );
+}
+
 export function extractPrompt(sentinel: string, lang: ResolvedLanguage, jur: Jurisdiction): string {
   return `${languageDirective(lang)}
 
@@ -147,6 +167,30 @@ For every actor named or implied — including the user — record goals, fears,
 resources, formal authority, what they DEPEND on others for, and how they are
 likely to react under pressure. Dependencies matter most: that is usually where
 leverage turns out to live.
+
+## Be compact. This is an index of the case, not a copy of it.
+
+The reader already has the account. Repeating it back costs the analysis that
+comes after this stage, because everything you write here is read again — and
+paid for again — by the two stages downstream.
+
+- ONE fact per entry, atomic, under about 15 words. "He presented the project
+  to the board on 12 March without naming me" is a fact. A paragraph is not.
+- Do NOT quote the account at length. Refer to what was said; do not reproduce
+  it. Never copy a whole message, letter or dialogue.
+- A fact goes in reportedFacts OR the reading of it goes in interpretations —
+  never the same content in both. "He took credit" is a fact; "he is trying to
+  push me out" is an interpretation of it.
+- Merge only genuinely duplicate facts. Two facts that differ in date, amount,
+  actor or consequence are two facts, and collapsing them destroys exactly the
+  detail the strategy stage needs.
+- Never drop, however long the account: deadlines and dates, amounts, what the
+  user wants, what the other side demanded, and anything the user says they
+  can prove.
+- ${extractLimitNote()}
+
+Keeping to this is not summarising the case away. Everything load-bearing must
+survive; what must not survive is the retelling.
 
 Answer in the language the account is written in.
 

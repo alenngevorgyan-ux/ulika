@@ -7,7 +7,7 @@ import { capFor, MODES, ModeNotAvailable, type AnalysisMode } from "@/lib/megabr
 import { CostLedger } from "@/lib/megabrain/costLedger";
 import { RunRecorder, describeFailure } from "@/lib/megabrain/runRecorder";
 import { buildDiagnostics } from "@/lib/megabrain/labDiagnostics";
-import { runAnalysis, renderAnalysis } from "@/lib/megabrain/engine";
+import { runAnalysis, renderAnalysis, CaseTooComplexError } from "@/lib/megabrain/engine";
 import { createOpenRouterTransport } from "@/lib/megabrain/transport";
 import { resolveConfiguration, DEFAULT_CONFIGURATION } from "@/lib/megabrain/modelRouter";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
@@ -124,6 +124,9 @@ export async function POST(req: NextRequest) {
         jurisdiction: body.jurisdiction ?? { country: "unknown" },
         configurationId: configuration.id === "lab-override" ? DEFAULT_CONFIGURATION : configuration.id,
         ledger,
+        // The product's cap for this tier, so an oversized case is refused at
+        // the door instead of after extract has been billed.
+        preflightCapUsd: capUsd,
       },
       createOpenRouterTransport(key)
     );
@@ -202,6 +205,27 @@ export async function POST(req: NextRequest) {
     // Safe codes only. A provider error body can quote the request, and the
     // request is somebody's situation.
     if (e instanceof ModeNotAvailable) return NextResponse.json({ error: e.code, mode }, { status: 400 });
+    /**
+     * Refused before any request left, so this is a 400 and not an engine
+     * failure: nothing ran, nothing was charged, and the user has a real choice
+     * to make rather than a fault to report.
+     */
+    if (e instanceof CaseTooComplexError) {
+      recorder?.finish("incomplete", describeFailure(e, "preflight"), { reportedSpendUsd: 0 });
+      return NextResponse.json(
+        {
+          error: e.code,
+          mode,
+          suggestedMode: e.suggestedMode,
+          projectedUsd: Number(e.projectedUsd.toFixed(4)),
+          capUsd: e.capUsd,
+          detail: e.suggestedMode
+            ? `Кейс проецируется в $${e.projectedUsd.toFixed(4)} при потолке $${e.capUsd.toFixed(2)}. Ничего не запущено и не списано. Подойдёт режим «${e.suggestedMode}».`
+            : `Кейс проецируется в $${e.projectedUsd.toFixed(4)} при потолке $${e.capUsd.toFixed(2)}. Ничего не запущено и не списано. Ни один доступный режим его не вмещает.`,
+        },
+        { status: 400 }
+      );
+    }
     if (e instanceof ModelChoiceRejected) return NextResponse.json({ error: e.code, detail: e.message }, { status: 400 });
 
     // Written before the response, so the journal survives even if serialising
