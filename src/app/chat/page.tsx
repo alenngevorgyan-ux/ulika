@@ -91,7 +91,14 @@ export default function ChatPage() {
   const [caseAnswers, setCaseAnswers] = useState<Record<string, string>>({});
   const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({});
   const [manualSettings, setManualSettings] = useState<ManualAlphaSettings | null>(null);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [moreActionsOpen, setMoreActionsOpen] = useState(false);
+  const [showLatest, setShowLatest] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const nearBottomRef = useRef(true);
   const sendInFlight = useRef(false);
   const { t, locale } = useT();
 
@@ -128,8 +135,23 @@ export default function ChatPage() {
   const { state: caseState, stale, send: sendEvent } = useCaseState(activeId);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [active?.messages.length, loading]);
+    if (nearBottomRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [active?.messages.length, loading, active?.caseFlow?.phase]);
+
+  useEffect(() => {
+    const area = composerRef.current;
+    if (!area) return;
+    area.style.height = "0px";
+    area.style.height = `${Math.min(area.scrollHeight, 176)}px`;
+  }, [input]);
+
+  function trackScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    nearBottomRef.current = near;
+    setShowLatest(!near);
+  }
 
   // Restore server-owned flow state after a browser refresh. The private case
   // text is not returned; it is already present in the user's local conversation.
@@ -356,7 +378,7 @@ export default function ChatPage() {
 
   return (
     <div
-      className="mx-auto max-w-6xl px-6 py-8 flex gap-6 h-[calc(100vh-73px)]"
+      className="relative mx-auto max-w-6xl px-3 sm:px-4 md:px-6 py-0 md:py-8 flex gap-6 h-[calc(100dvh-61px)] md:h-[calc(100dvh-73px)] min-h-0 overflow-hidden"
       data-crisis={active?.crisis ? "true" : undefined}
       style={{
         // A 2-3% tonal shift, not a colour change. Nobody should be able to
@@ -371,9 +393,14 @@ export default function ChatPage() {
       }}
     >
       {/* Conversation */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <h1 className="font-display text-2xl mb-1">The Mentalist</h1>
-        <p className="text-xs text-muted mb-6">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        <div className="md:hidden flex items-center justify-between h-12 shrink-0 border-b border-panel-border -mx-3 sm:-mx-4 px-3 sm:px-4">
+          <button type="button" onClick={() => setHistoryOpen(true)} className="min-h-11 min-w-11 -ml-2 rounded-lg text-muted" aria-label="Open conversation history">☰</button>
+          <span className="font-display text-base">Mentalist</span>
+          {manualSettings ? <button type="button" onClick={() => setControlsOpen(true)} className="min-h-11 px-2 rounded-lg text-xs text-accent" aria-label="Open experiment controls">Controls</button> : <span className="min-w-11" />}
+        </div>
+        <h1 className="hidden md:block font-display text-2xl mb-1">The Mentalist</h1>
+        <p className="hidden md:block text-xs text-muted mb-6">
           Twenty years reading people for a living. Now teaching you how it&apos;s done.
         </p>
 
@@ -384,22 +411,24 @@ export default function ChatPage() {
           questions={active?.caseFlow?.questions ?? []}
           answers={Object.fromEntries((active?.caseFlow?.questions ?? []).map((q) => [q.id, customAnswers[q.id] || caseAnswers[q.id] || ""]))}
           onSettings={setManualSettings}
+          mobileOpen={controlsOpen}
+          onMobileOpenChange={setControlsOpen}
         />
 
-        <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-1">
+        <div ref={scrollRef} onScroll={trackScroll} className="flex-1 overflow-y-auto overscroll-contain space-y-3 md:space-y-4 py-3 md:py-0 md:mb-4 pr-0 md:pr-1 min-h-0 scroll-pb-44">
           {active?.messages.map((m, i) => (
             <div
               key={i}
-              className={`rounded-lg px-4 py-3 ${
+              className={`rounded-xl px-3.5 sm:px-4 py-3 overflow-hidden [overflow-wrap:anywhere] ${
                 m.role === "user"
-                  ? "ml-auto max-w-[80%] bg-accent text-background text-sm leading-relaxed whitespace-pre-wrap"
-                  : "max-w-[92%] bg-panel border border-panel-border"
+                  ? "ml-auto max-w-[88%] md:max-w-[80%] bg-accent text-background text-[15px] md:text-sm leading-relaxed whitespace-pre-wrap"
+                  : "max-w-full md:max-w-[92%] bg-panel border border-panel-border"
               }`}
             >
               {m.role === "user" ? (
                 m.content
               ) : m.source === "megabrain" ? (
-                <div className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</div>
+                <div className="text-[15px] md:text-sm leading-7 md:leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">{m.content}</div>
               ) : (
                 <>
                   {!active?.crisis && active?.mode && i === (active?.messages.length ?? 0) - 1 && (
@@ -420,22 +449,24 @@ export default function ChatPage() {
             </div>
           ))}
           {loading && (
-            <div className="bg-panel border border-panel-border rounded-lg px-4 py-3 max-w-[90%]">
+            <div className="bg-panel border border-panel-border rounded-xl px-4 py-3 max-w-[94%]" role="status" aria-live="polite">
+              {active?.caseFlow?.phase === "analysing" && <p className="text-xs text-muted mb-2">Разбираю ситуацию…</p>}
               <ThinkingIndicator crisis={Boolean(active?.crisis)} />
             </div>
           )}
           {active?.caseFlow?.phase === "awaiting_answers" && (
-            <div className="bg-panel border border-panel-border rounded-lg px-4 py-4 max-w-[92%] space-y-4">
+            <div className="bg-panel border border-panel-border rounded-xl px-3.5 sm:px-4 py-4 max-w-full md:max-w-[92%] space-y-5">
               <p className="text-sm font-medium">Несколько ответов действительно изменят первый ход.</p>
               {active.caseFlow.questions.map((q) => (
                 <fieldset key={q.id} className="space-y-2">
                   <legend className="text-sm mb-2">{q.question}</legend>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="grid grid-cols-1 sm:flex sm:flex-wrap gap-2">
                     {[...q.options, "Другое"].map((option) => {
                       const value = option === "Другое" ? "__other" : option;
                       return (
                         <button key={value} type="button" onClick={() => setCaseAnswers((a) => ({ ...a, [q.id]: value }))}
-                          className={`text-xs rounded-full border px-3 py-1.5 ${caseAnswers[q.id] === value ? "border-accent text-accent" : "border-panel-border text-muted"}`}>
+                          aria-pressed={caseAnswers[q.id] === value}
+                          className={`min-h-11 text-left sm:text-center text-sm sm:text-xs rounded-xl sm:rounded-full border px-3 py-2.5 sm:py-1.5 ${caseAnswers[q.id] === value ? "border-accent bg-accent/10 text-accent" : "border-panel-border text-muted"}`}>
                           {option}
                         </button>
                       );
@@ -443,29 +474,27 @@ export default function ChatPage() {
                   </div>
                   {caseAnswers[q.id] === "__other" && (
                     <input value={customAnswers[q.id] ?? ""} onChange={(e) => setCustomAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                      placeholder="Ваш ответ" className="w-full bg-background border border-panel-border rounded-md px-3 py-2 text-sm" />
+                      placeholder="Ваш ответ" className="w-full min-h-11 bg-background border border-panel-border rounded-lg px-3 py-2 text-base md:text-sm" />
                   )}
                 </fieldset>
               ))}
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-col sm:flex-row gap-2">
                 <button type="button" onClick={() => continueCase("answer")} disabled={loading}
-                  className="bg-accent text-background rounded-md px-4 py-2 text-sm disabled:opacity-50">Продолжить</button>
+                  className="min-h-11 bg-accent text-background rounded-lg px-4 py-2 text-sm disabled:opacity-50">Продолжить</button>
                 <button type="button" onClick={() => continueCase("skip")} disabled={loading}
-                  className="border border-panel-border rounded-md px-4 py-2 text-sm text-muted disabled:opacity-50">Продолжить без уточнений</button>
+                  className="min-h-11 border border-panel-border rounded-lg px-4 py-2 text-sm text-muted disabled:opacity-50">Продолжить без уточнений</button>
               </div>
             </div>
           )}
           {active?.caseFlow?.phase === "completed" && !loading && (
-            <div className="flex flex-wrap gap-2 max-w-[92%]">
-              {[
-                ["why", "Почему именно так?"], ["stronger", "Дай более сильный ход"],
-                ["other_side", "Что ответит другая сторона?"], ["draft_message", "Составь сообщение"],
-                ["what_we_got_wrong", "Что мы могли понять неправильно?"],
-              ].map(([id, label]) => (
-                <button key={id} type="button" onClick={() => caseFollowUp(id)}
-                  className="text-xs border border-panel-border rounded-full px-3 py-1.5 text-muted hover:text-foreground">{label}</button>
-              ))}
-            </div>
+            <>
+              <div className="md:hidden flex flex-wrap gap-2 max-w-full pb-1">
+                {[["why", "Почему?"], ["stronger", "Сильнее"]].map(([id, label]) => <button key={id} type="button" onClick={() => caseFollowUp(id)} className="min-h-11 text-xs border border-panel-border rounded-full px-4 py-2 text-muted">{label}</button>)}
+                <button type="button" onClick={() => setMoreActionsOpen((open) => !open)} className="min-h-11 text-xs border border-panel-border rounded-full px-4 py-2 text-muted" aria-expanded={moreActionsOpen}>Ещё…</button>
+                {moreActionsOpen && <div className="basis-full grid grid-cols-1 gap-2 pt-1">{[["other_side", "Что ответит другая сторона?"], ["draft_message", "Составить сообщение"], ["what_we_got_wrong", "Что мы могли понять неправильно?"]].map(([id, label]) => <button key={id} type="button" onClick={() => { setMoreActionsOpen(false); void caseFollowUp(id); }} className="min-h-11 text-left text-xs border border-panel-border rounded-lg px-3 py-2 text-muted">{label}</button>)}</div>}
+              </div>
+              <div className="hidden md:flex flex-wrap gap-2 max-w-[92%]">{[["why", "Почему именно так?"], ["stronger", "Дай более сильный ход"], ["other_side", "Что ответит другая сторона?"], ["draft_message", "Составь сообщение"], ["what_we_got_wrong", "Что мы могли понять неправильно?"]].map(([id, label]) => <button key={id} type="button" onClick={() => caseFollowUp(id)} className="text-xs border border-panel-border rounded-full px-3 py-1.5 text-muted hover:text-foreground">{label}</button>)}</div>
+            </>
           )}
           <div ref={bottomRef} />
         </div>
@@ -476,7 +505,7 @@ export default function ChatPage() {
           </p>
         )}
 
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div className="hidden md:flex flex-wrap gap-2 mb-2">
           {[
             ["normal", "Обычный чат", true], ["light", "Быстро", true], ["standard", "Разобрать", true],
             ["strong", "Сильный ход", true], ["deep", "Глубокое дело", false],
@@ -489,22 +518,29 @@ export default function ChatPage() {
           ))}
         </div>
 
-        <div className="flex gap-2">
-          <input
+        {showLatest && <button type="button" onClick={() => { nearBottomRef.current = true; bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }} className="absolute bottom-36 md:bottom-24 left-1/2 -translate-x-1/2 z-20 rounded-full border border-panel-border bg-panel px-3 py-2 text-xs shadow-lg" aria-label="Jump to latest message">↓ latest</button>}
+        <div className="shrink-0 border-t border-panel-border bg-background/95 backdrop-blur -mx-3 sm:-mx-4 md:mx-0 px-3 sm:px-4 md:px-0 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:border-0 md:bg-transparent md:pt-0 md:pb-0">
+          <div className="md:hidden flex gap-1.5 overflow-x-auto pb-2 [scrollbar-width:none]" aria-label="Analysis mode">{[["normal", "Chat"], ["light", "Quick"], ["standard", "Case"], ["strong", "Strong"]].map(([id, label]) => <button key={id} type="button" disabled={loading} onClick={() => active && updateConversation(active.id, (c) => ({ ...c, analysisMode: id as ChatAnalysisMode, caseFlow: undefined }))} className={`min-h-11 shrink-0 rounded-full border px-3 text-xs ${active?.analysisMode === id || (!active?.analysisMode && id === "normal") ? "border-accent text-accent" : "border-panel-border text-muted"}`}>{label}</button>)}</div>
+          <div className="flex min-w-0 items-end gap-2">
+          <textarea
+            ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
+            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && (e.preventDefault(), void send())}
             disabled={loading || (active?.analysisMode !== "normal" && Boolean(active?.caseFlow))}
             placeholder={active?.analysisMode !== "normal" && active?.caseFlow ? "Продолжите дело кнопками выше." : "Say it plainly."}
-            className="flex-1 bg-panel border border-panel-border rounded-md px-4 py-3 text-sm outline-none focus:border-accent"
+            rows={1}
+            className="min-h-12 max-h-44 min-w-0 flex-1 resize-none overflow-y-auto bg-panel border border-panel-border rounded-2xl px-4 py-3 text-base md:text-sm leading-6 outline-none focus:border-accent"
           />
           <button
             onClick={send}
             disabled={loading || (active?.analysisMode !== "normal" && Boolean(active?.caseFlow))}
-            className="bg-accent text-background font-medium px-5 py-3 rounded-md text-sm hover:opacity-90 transition-opacity disabled:opacity-50"
+            aria-label="Send message"
+            className="min-h-12 min-w-12 bg-accent text-background font-medium px-3 md:px-5 py-3 rounded-full md:rounded-md text-lg md:text-sm hover:opacity-90 transition-opacity disabled:opacity-50"
           >
-            Send
+            <span className="md:hidden" aria-hidden="true">↑</span><span className="hidden md:inline">Send</span>
           </button>
+          </div>
         </div>
       </div>
 
@@ -548,6 +584,8 @@ export default function ChatPage() {
             ))}
         </div>
       </aside>
+
+      {historyOpen && <div className="md:hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Conversation history"><button type="button" className="absolute inset-0 bg-black/55" onClick={() => setHistoryOpen(false)} aria-label="Close history"/><aside className="absolute inset-y-0 left-0 w-[min(86vw,20rem)] bg-background border-r border-panel-border p-4 pt-[max(1rem,env(safe-area-inset-top))] shadow-2xl"><div className="flex items-center justify-between mb-4"><span className="font-mono text-xs uppercase tracking-wider text-muted">History</span><button type="button" onClick={() => { startNew(); setHistoryOpen(false); }} className="min-h-11 px-2 text-accent">+ New</button></div><div className="overflow-y-auto space-y-1 max-h-[calc(100dvh-5rem)]">{[...conversations].sort((a, b) => b.updatedAt - a.updatedAt).map((c) => <div key={c.id} className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${c.id === activeId ? "bg-panel border-panel-border" : "border-transparent"}`}><button type="button" onClick={() => { setActiveId(c.id); setHistoryOpen(false); }} className="min-h-11 flex-1 text-left text-sm line-clamp-2">{c.title}</button><button type="button" onClick={() => remove(c.id)} className="min-h-11 min-w-11 text-muted" aria-label={`Delete ${c.title}`}>×</button></div>)}</div></aside></div>}
     </div>
   );
 }
