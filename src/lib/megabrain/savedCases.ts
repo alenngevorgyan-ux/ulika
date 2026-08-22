@@ -29,6 +29,17 @@ function defaultPath(): string {
   return join(process.cwd(), ".megabrain-journal", "manual-alpha", "saved-cases.json");
 }
 
+export function savedCasePersistence(): { available: boolean; durable: boolean; reason: string | null } {
+  if (process.env.VERCEL) {
+    return { available: false, durable: false, reason: "Saved Case is disabled on Preview: the serverless filesystem is ephemeral." };
+  }
+  return { available: true, durable: true, reason: null };
+}
+
+function requireDefaultPersistence(path: string): void {
+  if (path === defaultPath() && !savedCasePersistence().available) throw new Error("SAVED_CASE_UNAVAILABLE");
+}
+
 async function readAll(path: string): Promise<SavedCase[]> {
   try {
     const raw = JSON.parse(await readFile(path, "utf8"));
@@ -48,6 +59,7 @@ async function writeAll(path: string, rows: SavedCase[]): Promise<void> {
 }
 
 export async function listSavedCases(ownerId: string, path = defaultPath()): Promise<SavedCase[]> {
+  requireDefaultPersistence(path);
   return (await readAll(path)).filter((row) => row.ownerId === ownerId);
 }
 
@@ -56,6 +68,7 @@ export async function getSavedCase(ownerId: string, id: string, path = defaultPa
 }
 
 export async function saveCase(ownerId: string, draft: SavedCaseDraft, path = defaultPath()): Promise<SavedCase> {
+  requireDefaultPersistence(path);
   const rows = await readAll(path);
   const existing = rows.find((row) => row.ownerId === ownerId && row.flowId === draft.flowId);
   const now = new Date().toISOString();

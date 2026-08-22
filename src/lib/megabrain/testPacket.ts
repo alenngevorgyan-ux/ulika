@@ -26,6 +26,12 @@ export interface TestPacketInput {
   conservativeUsd: number;
   latencyMs: number;
   revealed: boolean;
+  retrievedCards?: { name: string; type: string }[];
+  includeKnowledgeDebug?: boolean;
+  founderRating?: string;
+  megabrainMoment?: string;
+  actionTaken?: string;
+  laterOutcome?: string;
 }
 
 export function buildTestPacket(p: TestPacketInput): string {
@@ -46,6 +52,7 @@ export function buildTestPacket(p: TestPacketInput): string {
     "## Clarification",
     p.questions.length ? p.questions.map((q, i) => `${i + 1}. ${safe(q.question)}`).join("\n") : "None",
     ...Object.entries(p.answers).map(([id, answer]) => `- ${safe(id)}: ${safe(answer)}`),
+    ...(p.includeKnowledgeDebug ? ["", "## Retrieved cards", ...(p.retrievedCards ?? []).map((card) => `- ${safe(card.name)} [${safe(card.type)}]`)] : []),
     "",
     "## Final response",
     safe(p.finalResponse),
@@ -54,5 +61,11 @@ export function buildTestPacket(p: TestPacketInput): string {
     `Actual provider cost: ${p.actualCostUsd === null ? "unavailable" : `$${p.actualCostUsd.toFixed(6)}`}`,
     `Conservative debit: $${p.conservativeUsd.toFixed(6)}`,
     `Latency: ${Math.round(p.latencyMs)} ms`,
+    "",
+    "## Founder notes",
+    `Useful: ${safe(p.founderRating ?? "")}`,
+    `Megabrain moment: ${safe(p.megabrainMoment ?? "")}`,
+    `Action taken: ${safe(p.actionTaken ?? "")}`,
+    `Later outcome: ${safe(p.laterOutcome ?? "")}`,
   ].join("\n");
 }

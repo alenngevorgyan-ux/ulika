@@ -3,7 +3,7 @@ import { manualAdminId } from "@/lib/megabrain/manualAccess";
 import { MANUAL_PRESETS, resolveManualPreset } from "@/lib/megabrain/manualPresets";
 import { SOURCE_REGISTRY, retrieveManualKnowledge } from "@/lib/megabrain/manualKnowledge";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
-import { getSavedCase, listSavedCases, saveCase } from "@/lib/megabrain/savedCases";
+import { getSavedCase, listSavedCases, saveCase, savedCasePersistence } from "@/lib/megabrain/savedCases";
 import { ownedFlow } from "@/lib/megabrain/caseFlow";
 import { projectAdvicePipeline, runAdvice } from "@/lib/megabrain/engine";
 import { CostLedger } from "@/lib/megabrain/costLedger";
@@ -30,6 +30,7 @@ function calls(ledger: CostLedger) {
 export async function GET() {
   const ownerId = await manualAdminId();
   if (!ownerId) return hidden();
+  const persistence = savedCasePersistence();
   return NextResponse.json({
     presets: Object.values(MANUAL_PRESETS).map((preset) => ({
       id: preset.id,
@@ -41,7 +42,8 @@ export async function GET() {
       execution: preset.execution,
     })),
     sources: SOURCE_REGISTRY,
-    savedCases: (await listSavedCases(ownerId)).map((saved) => ({ id: saved.id, title: saved.title, updatedAt: saved.updatedAt })),
+    savedCasePersistence: persistence,
+    savedCases: persistence.available ? (await listSavedCases(ownerId)).map((saved) => ({ id: saved.id, title: saved.title, updatedAt: saved.updatedAt })) : [],
   });
 }
 

@@ -53,10 +53,13 @@ export interface CaseFlow {
     fixedAnswers: Record<string, string>;
     memoryContext: string;
     retrieval: {
-      cards: { id: string; name: string; sourceIds: string[]; sourceNames: string[]; evidenceStrength: string; relevanceScore: number }[];
+      cards: { id: string; name: string; type: string; sourceIds: string[]; sourceNames: string[]; evidenceStrength: string; relevanceScore: number }[];
+      families: string[];
+      informationPlan: { unknown: string; safeWayToObtain: string; risk: string }[];
       latencyMs: number;
       tokenEstimate: number;
       limitation: string | null;
+      truncated: boolean;
     } | null;
     snapshot: {
       actors: string[];

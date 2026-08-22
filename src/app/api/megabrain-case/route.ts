@@ -28,7 +28,7 @@ import { createOpenRouterTransport } from "@/lib/megabrain/transport";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
 import { manualAdminId } from "@/lib/megabrain/manualAccess";
 import { parseClarificationMode, parseKnowledgeMode, parseMemoryMode, resolveManualPreset } from "@/lib/megabrain/manualPresets";
-import { retrieveManualKnowledge } from "@/lib/megabrain/manualKnowledge";
+import { retrieveManualKnowledge, SOURCE_REGISTRY } from "@/lib/megabrain/manualKnowledge";
 import { getSavedCase, renderSavedContext } from "@/lib/megabrain/savedCases";
 
 export const maxDuration = 300;
@@ -274,14 +274,18 @@ export async function POST(req: NextRequest) {
         cards: retrieval.cards.map((card) => ({
           id: card.id,
           name: card.name,
+          type: card.type,
           sourceIds: card.source_ids,
-          sourceNames: card.source_ids.map((id) => id === "ulika-original-notes" ? "ULIKA original knowledge notes" : id),
+          sourceNames: card.source_ids.map((id) => SOURCE_REGISTRY.find((source) => source.id === id)?.title ?? id),
           evidenceStrength: card.evidence_strength,
           relevanceScore: card.relevance_score,
         })),
+        families: retrieval.families,
+        informationPlan: retrieval.informationPlan.map((item) => ({ unknown: item.unknown, safeWayToObtain: item.safe_way_to_obtain, risk: item.risk })),
         latencyMs: retrieval.latencyMs,
         tokenEstimate: retrieval.tokenEstimate,
         limitation: retrieval.limitation,
+        truncated: retrieval.truncated,
       };
     }
     const projectedBase = projectAdvicePipeline({
