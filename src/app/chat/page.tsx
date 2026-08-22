@@ -11,6 +11,19 @@ import { useT } from "@/lib/i18n/useT";
 interface Message {
   role: "user" | "assistant";
   content: string;
+  source?: "chat" | "megabrain";
+}
+
+type ChatAnalysisMode = "normal" | "light" | "standard" | "strong" | "deep";
+
+interface CaseFlowView {
+  id: string;
+  phase: "intake" | "awaiting_answers" | "analysing" | "completed" | "failed";
+  mode: Exclude<ChatAnalysisMode, "normal" | "deep">;
+  questions: { id: string; question: string; options: string[] }[];
+  answer: string | null;
+  followUps: { action: string; answer: string }[];
+  safeError: string | null;
 }
 
 interface Conversation {
@@ -21,6 +34,8 @@ interface Conversation {
   /** Sticky for the session once the detector fires — see the container below. */
   crisis?: boolean;
   mode?: "exploring" | "advising";
+  analysisMode?: ChatAnalysisMode;
+  caseFlow?: CaseFlowView;
 }
 
 const STORAGE_KEY = "ulika-conversations";
@@ -37,6 +52,7 @@ function newConversation(): Conversation {
     title: "New conversation",
     messages: [OPENER],
     updatedAt: Date.now(),
+    analysisMode: "normal",
   };
 }
 
@@ -53,7 +69,10 @@ export default function ChatPage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [caseAnswers, setCaseAnswers] = useState<Record<string, string>>({});
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  const sendInFlight = useRef(false);
   const { t, locale } = useT();
 
   // Load history once on mount.
@@ -73,13 +92,16 @@ export default function ChatPage() {
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
-  const persist = useCallback((next: Conversation[]) => {
-    setConversations(next);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      /* quota exceeded — session still works, history just won't survive */
-    }
+  const persist = useCallback((nextOrUpdate: Conversation[] | ((current: Conversation[]) => Conversation[])) => {
+    setConversations((current) => {
+      const next = typeof nextOrUpdate === "function" ? nextOrUpdate(current) : nextOrUpdate;
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* quota exceeded — session still works, history just won't survive */
+      }
+      return next;
+    });
   }, []);
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
@@ -89,9 +111,63 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [active?.messages.length, loading]);
 
+  // Restore server-owned flow state after a browser refresh. The private case
+  // text is not returned; it is already present in the user's local conversation.
+  useEffect(() => {
+    const flowId = active?.caseFlow?.id;
+    if (!flowId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const r = await fetch(`/api/megabrain-case?flowId=${encodeURIComponent(flowId)}`);
+        const data = r.ok ? await r.json() : null;
+        if (cancelled || !data?.flow) return;
+        const flow = data.flow as CaseFlowView;
+        persist((current) => current.map((c) => {
+          if (c.id !== active.id) return c;
+          const hasAnswer = flow.answer && c.messages.some((m) => m.source === "megabrain" && m.content === flow.answer);
+          return {
+            ...c,
+            caseFlow: flow,
+            messages: flow.phase === "completed" && flow.answer && !hasAnswer
+              ? [...c.messages, { role: "assistant", source: "megabrain", content: flow.answer }]
+              : c.messages,
+          };
+        }));
+        if (flow.phase === "intake" || flow.phase === "analysing") {
+          timer = setTimeout(refresh, 1_000);
+        }
+      } catch {
+        /* the normal chat remains usable if the ephemeral flow expired */
+      }
+    };
+    void refresh();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // Refresh only when the active flow identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.caseFlow?.id]);
+
+  function updateConversation(id: string, update: (c: Conversation) => Conversation) {
+    persist((current) => current.map((c) => c.id === id ? update(c) : c));
+  }
+
+  function applyCaseFlow(conversation: Conversation, flow: CaseFlowView, extraMessages: Message[] = [], updatedAt = conversation.updatedAt): Conversation {
+    return {
+      ...conversation,
+      caseFlow: flow,
+      messages: [...conversation.messages, ...extraMessages],
+      updatedAt,
+    };
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || loading || !active) return;
+    if (!text || loading || sendInFlight.current || !active) return;
+    sendInFlight.current = true;
 
     const nextMessages = [...active.messages, { role: "user" as const, content: text }];
     const withUser = conversations.map((c) =>
@@ -104,12 +180,43 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/chat", {
+      const selectedMode = active.analysisMode ?? "normal";
+      const res = await fetch(selectedMode === "normal" ? "/api/chat" : "/api/megabrain-case", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages, conversationId: active.id, locale }),
+        body: JSON.stringify(selectedMode === "normal"
+          ? { messages: nextMessages, conversationId: active.id, locale }
+          : {
+              action: "create",
+              requestId: crypto.randomUUID(),
+              conversationId: active.id,
+              account: text,
+              mode: selectedMode,
+              responseLanguage: locale,
+              jurisdiction: { country: "unknown" },
+            }),
       });
       const data = await res.json();
+      if (selectedMode !== "normal") {
+        if (!res.ok || !data.flow) {
+          const errorText = data.error === "AUTH_REQUIRED"
+            ? "Войдите в аккаунт, чтобы открыть стратегическое дело. Обычный чат доступен без входа."
+            : "Не удалось продолжить стратегическое дело. Попробуйте ещё раз.";
+          persist(withUser.map((c) => c.id === active.id
+            ? { ...c, messages: [...nextMessages, { role: "assistant", source: "megabrain", content: errorText }], updatedAt: Date.now() }
+            : c));
+          return;
+        }
+        const flow = data.flow as CaseFlowView;
+        const extra: Message[] = flow.phase === "completed" && flow.answer
+          ? [{ role: "assistant", source: "megabrain", content: flow.answer }]
+          : [];
+        const updatedAt = active.updatedAt + 1;
+        persist(withUser.map((c) => c.id === active.id ? applyCaseFlow(c, flow, extra, updatedAt) : c));
+        setCaseAnswers({});
+        setCustomAnswers({});
+        return;
+      }
       const reply = data.reply || "Nothing came back. Try again.";
       const wasCrisis = Boolean(data.crisis);
       const done = [...nextMessages, { role: "assistant" as const, content: reply }];
@@ -140,6 +247,75 @@ export default function ChatPage() {
         )
       );
     } finally {
+      sendInFlight.current = false;
+      setLoading(false);
+    }
+  }
+
+  async function continueCase(action: "answer" | "skip") {
+    if (!active?.caseFlow || loading || sendInFlight.current) return;
+    sendInFlight.current = true;
+    setLoading(true);
+    try {
+      const answers = Object.fromEntries(active.caseFlow.questions.map((q) => {
+        const selected = caseAnswers[q.id];
+        return [q.id, selected === "__other" ? (customAnswers[q.id] ?? "") : (selected ?? "")];
+      }).filter(([, value]) => String(value).trim()));
+      const res = await fetch("/api/megabrain-case", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          requestId: crypto.randomUUID(),
+          flowId: active.caseFlow.id,
+          ...(action === "answer" ? { answers } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!data.flow) return;
+      const flow = data.flow as CaseFlowView;
+      const answerSummary = action === "skip"
+        ? "Продолжить без уточнений."
+        : Object.values(answers).join(" · ");
+      const extra: Message[] = [
+        { role: "user", source: "megabrain", content: answerSummary },
+        ...(flow.phase === "completed" && flow.answer
+          ? [{ role: "assistant" as const, source: "megabrain" as const, content: flow.answer }]
+          : []),
+        ...(flow.phase === "failed"
+          ? [{ role: "assistant" as const, source: "megabrain" as const, content: "Разбор остановлен безопасно. Новый модельный вызов автоматически не выполнялся." }]
+          : []),
+      ];
+      const updatedAt = active.updatedAt + 1;
+      updateConversation(active.id, (c) => applyCaseFlow(c, flow, extra, updatedAt));
+      setCaseAnswers({});
+      setCustomAnswers({});
+    } finally {
+      sendInFlight.current = false;
+      setLoading(false);
+    }
+  }
+
+  async function caseFollowUp(action: string) {
+    if (!active?.caseFlow || loading || sendInFlight.current) return;
+    sendInFlight.current = true;
+    setLoading(true);
+    try {
+      const res = await fetch("/api/megabrain-case", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "follow_up", requestId: crypto.randomUUID(), flowId: active.caseFlow.id, followUpAction: action }),
+      });
+      const data = await res.json();
+      if (!data.flow) return;
+      const flow = data.flow as CaseFlowView;
+      const latest = flow.followUps[flow.followUps.length - 1];
+      const updatedAt = active.updatedAt + 1;
+      updateConversation(active.id, (c) => applyCaseFlow(c, flow, latest
+        ? [{ role: "assistant", source: "megabrain", content: latest.answer }]
+        : [], updatedAt));
+    } finally {
+      sendInFlight.current = false;
       setLoading(false);
     }
   }
@@ -192,6 +368,8 @@ export default function ChatPage() {
             >
               {m.role === "user" ? (
                 m.content
+              ) : m.source === "megabrain" ? (
+                <div className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</div>
               ) : (
                 <>
                   {!active?.crisis && active?.mode && i === (active?.messages.length ?? 0) - 1 && (
@@ -216,6 +394,49 @@ export default function ChatPage() {
               <ThinkingIndicator crisis={Boolean(active?.crisis)} />
             </div>
           )}
+          {active?.caseFlow?.phase === "awaiting_answers" && (
+            <div className="bg-panel border border-panel-border rounded-lg px-4 py-4 max-w-[92%] space-y-4">
+              <p className="text-sm font-medium">Несколько ответов действительно изменят первый ход.</p>
+              {active.caseFlow.questions.map((q) => (
+                <fieldset key={q.id} className="space-y-2">
+                  <legend className="text-sm mb-2">{q.question}</legend>
+                  <div className="flex flex-wrap gap-2">
+                    {[...q.options, "Другое"].map((option) => {
+                      const value = option === "Другое" ? "__other" : option;
+                      return (
+                        <button key={value} type="button" onClick={() => setCaseAnswers((a) => ({ ...a, [q.id]: value }))}
+                          className={`text-xs rounded-full border px-3 py-1.5 ${caseAnswers[q.id] === value ? "border-accent text-accent" : "border-panel-border text-muted"}`}>
+                          {option}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {caseAnswers[q.id] === "__other" && (
+                    <input value={customAnswers[q.id] ?? ""} onChange={(e) => setCustomAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
+                      placeholder="Ваш ответ" className="w-full bg-background border border-panel-border rounded-md px-3 py-2 text-sm" />
+                  )}
+                </fieldset>
+              ))}
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => continueCase("answer")} disabled={loading}
+                  className="bg-accent text-background rounded-md px-4 py-2 text-sm disabled:opacity-50">Продолжить</button>
+                <button type="button" onClick={() => continueCase("skip")} disabled={loading}
+                  className="border border-panel-border rounded-md px-4 py-2 text-sm text-muted disabled:opacity-50">Продолжить без уточнений</button>
+              </div>
+            </div>
+          )}
+          {active?.caseFlow?.phase === "completed" && !loading && (
+            <div className="flex flex-wrap gap-2 max-w-[92%]">
+              {[
+                ["why", "Почему именно так?"], ["stronger", "Дай более сильный ход"],
+                ["other_side", "Что ответит другая сторона?"], ["draft_message", "Составь сообщение"],
+                ["what_we_got_wrong", "Что мы могли понять неправильно?"],
+              ].map(([id, label]) => (
+                <button key={id} type="button" onClick={() => caseFollowUp(id)}
+                  className="text-xs border border-panel-border rounded-full px-3 py-1.5 text-muted hover:text-foreground">{label}</button>
+              ))}
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
 
@@ -225,17 +446,31 @@ export default function ChatPage() {
           </p>
         )}
 
+        <div className="flex flex-wrap gap-2 mb-2">
+          {[
+            ["normal", "Обычный чат", true], ["light", "Быстро", true], ["standard", "Разобрать", true],
+            ["strong", "Сильный ход", true], ["deep", "Глубокое дело", false],
+          ].map(([id, label, available]) => (
+            <button key={String(id)} type="button" disabled={!available || loading}
+              onClick={() => active && updateConversation(active.id, (c) => ({ ...c, analysisMode: id as ChatAnalysisMode, caseFlow: undefined }))}
+              className={`text-xs rounded-full border px-3 py-1.5 disabled:opacity-35 ${active?.analysisMode === id || (!active?.analysisMode && id === "normal") ? "border-accent text-accent" : "border-panel-border text-muted"}`}>
+              {String(label)}{!available ? " — скоро" : ""}
+            </button>
+          ))}
+        </div>
+
         <div className="flex gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Say it plainly."
+            disabled={loading || (active?.analysisMode !== "normal" && Boolean(active?.caseFlow))}
+            placeholder={active?.analysisMode !== "normal" && active?.caseFlow ? "Продолжите дело кнопками выше." : "Say it plainly."}
             className="flex-1 bg-panel border border-panel-border rounded-md px-4 py-3 text-sm outline-none focus:border-accent"
           />
           <button
             onClick={send}
-            disabled={loading}
+            disabled={loading || (active?.analysisMode !== "normal" && Boolean(active?.caseFlow))}
             className="bg-accent text-background font-medium px-5 py-3 rounded-md text-sm hover:opacity-90 transition-opacity disabled:opacity-50"
           >
             Send
