@@ -1,7 +1,27 @@
 # Mentalist Megabrain V0 — how to run it and how to read the result
 
-Branch `feat/mentalist-megabrain-v0`. **Not connected to the public chat**, and
-must not be until it demonstrably wins.
+Branch `feat/mentalist-megabrain-v0`. Connected only to the local feature-branch
+chat; not deployed or pushed to staging/production.
+
+## User vertical slice: ephemeral case flow
+
+The product chat has an authenticated Megabrain path beside the unchanged
+ordinary chat. A case is owned by the server and moves through
+`intake → awaiting_answers → analysing → completed|failed`. The browser receives
+an opaque flow id and public questions; it cannot replace the account,
+questions, mode or cap on the answer turn. Request ids make repeat submissions
+idempotent, and a completed answer survives an optional follow-up failure.
+
+V0 stores this state only in server memory for 30 minutes. It does not write a
+real situation, answer or hidden brief to Supabase, benchmark artifacts or the
+metadata ledger. Refresh works while the same process is alive. A server restart
+loses the flow, and this store is not suitable for multi-instance deployment.
+Durable cross-device history remains a separate product and privacy decision.
+
+Before the first model call, the engine projects clarification, the selected
+private analysis shape, the Strong critic when selected, and final prose against
+the server-owned mode cap. After clarification, its accounted spend is removed
+from the same flow budget before analysis continues.
 
 ## What V0 is trying to prove
 
@@ -27,15 +47,14 @@ deprecated, and mean nothing to somebody with a problem at work.
 
 | mode | label | calls | cap | expected | reserved |
 |---|---|---|---|---|---|
-| light | Быстро / Quick | 1 | $0.02 | $0.0038 | $0.0061 |
-| standard | Разобрать / Analyse | ≤4 | $0.05 | $0.0175 | $0.0326 |
-| strong | Сильный ход / Strong move | ≤5 | $0.10 | $0.0255 | $0.0480 |
+| light | Быстро / Quick | ≤4 | $0.02 | see local dry-run | see local dry-run |
+| standard | Разобрать / Analyse | ≤8 | $0.05 | see local dry-run | see local dry-run |
+| strong | Сильный ход / Strong move | ≤11 | $0.10 | see local dry-run | see local dry-run |
 | deep | Глубокое дело / Deep case | — | $0.15 | — | **disabled** |
 
-**Light is its own job**, not a compressed Standard: one assessment, one move,
-one line to say, one risk, one question. Squeezing a case file into one call
-produces a worse version of both, so it is a separate function — "at most one
-model call" is a property of the code shape rather than a rule to remember.
+**Light is its own job**, not a compressed Standard: after the shared
+clarification gate it buys final prose without a private case file. The gate may
+retry malformed JSON once; the prose call does not retry.
 
 **Strong adds exactly one revision pass.** The critic sees the finished plan,
 the facts and the constraints — never the raw account, never the earlier

@@ -40,9 +40,11 @@ describe("the three-way comparison is blind and fairly budgeted", () => {
 
   it("judges on usability, not on the presence of structure", () => {
     const text = JUDGING_CRITERIA.join(" ");
-    expect(text).toMatch(/практическая применимость/);
-    expect(text).toMatch(/точных слов/);
-    expect(text).not.toMatch(/CaseFrame|поля|структур/);
+    expect(text).toMatch(/nearest priority/);
+    expect(text).toMatch(/exact words/);
+    expect(text).toMatch(/decision density/);
+    expect(JUDGING_CRITERIA).toHaveLength(16);
+    expect(text).not.toMatch(/CaseFrame|ActorMap|наличие полей/);
   });
 
   it("reports a failed variant instead of scoring it as an empty answer", async () => {
