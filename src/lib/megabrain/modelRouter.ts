@@ -105,6 +105,24 @@ export const MODELS: Record<string, ModelSpec> = {
     // From OpenRouter's catalogue, read 2026-08-22. Not from memory.
     maxCompletionTokens: "unpublished",
   },
+  "qwen-3.6-max-preview": {
+    slug: "qwen/qwen3.6-max-preview",
+    provider: "openrouter",
+    inputPerMTok: 1.027,
+    outputPerMTok: 6.162,
+    contextTokens: 262_144,
+    structuredOutputs: true,
+    maxCompletionTokens: 65_536,
+  },
+  "glm-5.2": {
+    slug: "z-ai/glm-5.2",
+    provider: "openrouter",
+    inputPerMTok: 0.336,
+    outputPerMTok: 1.056,
+    contextTokens: 1_024_000,
+    structuredOutputs: true,
+    maxCompletionTokens: 128_000,
+  },
 };
 
 /**
@@ -269,6 +287,32 @@ export const CONFIGURATIONS: Record<string, Configuration> = {
     baselineModel: "claude-sonnet-5",
     judgeModel: "grok-4.3",
     status: "unverified",
+  },
+  "manual-premium": {
+    id: "manual-premium",
+    description: "Manual Alpha: Gemini extraction, Qwen hidden strategy.",
+    roles: {
+      extract: "gemini-3.1-flash-lite",
+      analyse: "qwen-3.6-max-preview",
+      strategise: "qwen-3.6-max-preview",
+    },
+    pipeline: "two-stage",
+    baselineModel: "qwen-3.6-max-preview",
+    judgeModel: "qwen-3.6-max-preview",
+    status: "verified",
+  },
+  "manual-cheap": {
+    id: "manual-cheap",
+    description: "Manual Alpha: Gemini extraction, GLM hidden strategy.",
+    roles: {
+      extract: "gemini-3.1-flash-lite",
+      analyse: "glm-5.2",
+      strategise: "glm-5.2",
+    },
+    pipeline: "two-stage",
+    baselineModel: "glm-5.2",
+    judgeModel: "glm-5.2",
+    status: "verified",
   },
 };
 

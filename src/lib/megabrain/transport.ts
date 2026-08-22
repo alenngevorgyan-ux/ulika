@@ -14,6 +14,13 @@ import { readUsage, type ProviderUsage } from "./costLedger";
  * network — a paid call from a unit test is a bill nobody approved.
  */
 
+export interface ReasoningConfig {
+  enabled?: boolean;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  maxTokens?: number;
+  exclude?: boolean;
+}
+
 export interface CompletionRequest {
   modelSlug: string;
   /** Ceiling prices per million tokens, sent to the provider as a hard bound. */
@@ -25,6 +32,11 @@ export interface CompletionRequest {
   jsonSchema?: { name: string; schema: Record<string, unknown> };
   temperature?: number;
   timeoutMs?: number;
+  /**
+   * Experimental reasoning controls. Omitted by every production call unless
+   * an admin-only execution profile supplies them explicitly.
+   */
+  reasoning?: ReasoningConfig;
 }
 
 /**
@@ -260,6 +272,7 @@ export function createOpenRouterTransport(apiKey: string): Transport {
           ],
           max_tokens: req.maxOutputTokens,
           temperature: req.temperature ?? 0.7,
+          ...(req.reasoning ? { reasoning: req.reasoning } : {}),
           ...(req.jsonSchema
             ? {
                 response_format: {

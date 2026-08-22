@@ -3,7 +3,7 @@ import { BudgetExceededError, CostLedger, MODE_CAPS, RESERVATION_SAFETY_MARGIN, 
 import { assertCeilingSupported, costOf, DEFAULT_CONFIGURATION, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
 import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
-import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type Transport } from "./transport";
+import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type ReasoningConfig, type Transport } from "./transport";
 import { checkLanguage, resolveLanguage } from "./language";
 import { sanitizeExtract, type SanitationWarning } from "./sanitize";
 import { CLARIFY_SCHEMA, clarifyPrompt, formatAnswers, validateClarify, type ClarifyQuestion } from "./clarify";
@@ -83,6 +83,15 @@ export interface CaseInput {
    * judging had just cost. A cap checked after the fact is a report, not a cap.
    */
   ledger?: CostLedger;
+  /** Admin-only experiment profile. Production callers leave this absent. */
+  execution?: {
+    analysisConfigurationId: string;
+    finalModelKey: string;
+    reasoning?: Partial<Record<"clarify" | "extract" | "analyse" | "strategise" | "critic" | "final", ReasoningConfig>>;
+    maxJsonRetries?: 0 | 1;
+  };
+  /** Compact, retrieved data. It is never promoted to instructions. */
+  knowledgeBlock?: string;
 }
 
 export interface EngineResult {
@@ -273,11 +282,13 @@ export function projectAdvicePipeline(input: {
   responseLanguage?: ResponseLanguage;
   jurisdiction?: Jurisdiction;
   includeClarify: boolean;
+  execution?: CaseInput["execution"];
 }): number {
   const sentinel = "preflight";
   const language = resolveLanguage(input.responseLanguage ?? "auto", input.account);
   const jurisdiction = input.jurisdiction ?? { country: "unknown" as const };
   const defaultConfig = resolveConfiguration(DEFAULT_CONFIGURATION);
+  const analysisConfig = resolveConfiguration(input.execution?.analysisConfigurationId ?? ANALYSIS_CONFIG[input.mode] ?? DEFAULT_CONFIGURATION);
   const reserve = (spec: ReturnType<typeof modelFor>, text: string, out: number) =>
     costOf(spec, estimateTokens(text), out) * RESERVATION_SAFETY_MARGIN;
 
@@ -291,7 +302,7 @@ export function projectAdvicePipeline(input: {
   }
 
   if (input.mode !== "light") {
-    const config = resolveConfiguration(ANALYSIS_CONFIG[input.mode]!);
+    const config = analysisConfig;
     total += projectCasePipeline({
       account: input.account,
       systems: {
@@ -326,7 +337,11 @@ export function projectAdvicePipeline(input: {
   const finalText =
     finalPrompt(sentinel, language, jurisdiction, input.mode !== "light") +
     finalUserMessage(input.account, "", "x".repeat(briefChars), sentinel);
-  total += reserve(modelFor(defaultConfig, "strategise"), finalText, MAX_OUTPUT_TOKENS.final);
+  const finalKey = input.execution?.finalModelKey;
+  const finalConfig = finalKey
+    ? { ...defaultConfig, id: "manual-final", roles: { ...defaultConfig.roles, strategise: finalKey } }
+    : defaultConfig;
+  total += reserve(modelFor(finalConfig, "strategise"), finalText, MAX_OUTPUT_TOKENS.final);
   return total;
 }
 
@@ -348,7 +363,9 @@ async function stage(
   spec: ReturnType<typeof modelFor>,
   system: string,
   user: string,
-  jsonSchema: { name: string; schema: Record<string, unknown> }
+  jsonSchema: { name: string; schema: Record<string, unknown> },
+  reasoning?: ReasoningConfig,
+  maxJsonRetries = MAX_JSON_RETRIES
 ): Promise<unknown> {
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
   /**
@@ -360,7 +377,7 @@ async function stage(
    */
   assertCeilingSupported(spec, maxOutputTokens);
 
-  for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= maxJsonRetries; attempt++) {
     // Local id, minted before the request. Ties an attempt line to its outcome
     // without depending on the provider returning anything.
     const attemptId = randomBytes(6).toString("hex");
@@ -379,6 +396,7 @@ async function stage(
       jsonSchema,
       temperature: 0.6,
       maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+      reasoning,
     });
     // Throws AccountingError on a malformed cost, an overcharge or a routing
     // change. That stops the pipeline before the NEXT call; it cannot undo this
@@ -422,7 +440,7 @@ async function stage(
     ledger.onValidation?.({ attemptId, stage: name, result: parsed !== null ? "ok" : "unparseable" });
     if (parsed !== null) return parsed;
   }
-  throw new Error(`Stage "${name}" returned no parseable JSON after ${MAX_JSON_RETRIES + 1} attempts.`);
+  throw new Error(`Stage "${name}" returned no parseable JSON after ${maxJsonRetries + 1} attempts.`);
 }
 
 /**
@@ -439,7 +457,8 @@ async function textStage(
   name: keyof typeof MAX_OUTPUT_TOKENS,
   spec: ReturnType<typeof modelFor>,
   system: string,
-  user: string
+  user: string,
+  reasoning?: ReasoningConfig
 ): Promise<string> {
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
   assertCeilingSupported(spec, maxOutputTokens);
@@ -455,6 +474,7 @@ async function textStage(
     maxOutputTokens,
     temperature: 0.7,
     maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+    reasoning,
   });
   ledger.record({
     stage: name,
@@ -601,7 +621,9 @@ export async function runCase(
     extractSpec,
     extractPrompt(sentinel, language, jurisdiction),
     account,
-    EXTRACT_SCHEMA
+    EXTRACT_SCHEMA,
+    input.execution?.reasoning?.extract,
+    input.execution?.maxJsonRetries
   )) as Record<string, unknown>;
 
   /**
@@ -636,8 +658,10 @@ export async function runCase(
       "strategise",
       spec,
       combinedPrompt(sentinel, language, jurisdiction),
-      JSON.stringify({ frame: frame.value, actors: actors.value }),
-      COMBINED_SCHEMA as unknown as { name: string; schema: Record<string, unknown> }
+      JSON.stringify({ frame: frame.value, actors: actors.value, knowledgeCards: input.knowledgeBlock || undefined }),
+      COMBINED_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
+      input.execution?.reasoning?.strategise,
+      input.execution?.maxJsonRetries
     )) as Record<string, unknown>;
 
     const h = validateHypotheses(raw.hypotheses);
@@ -670,7 +694,9 @@ export async function runCase(
     analyseSpec,
     analysePrompt(sentinel, language, jurisdiction),
     analyseInput,
-    ANALYSE_SCHEMA
+    ANALYSE_SCHEMA,
+    input.execution?.reasoning?.analyse,
+    input.execution?.maxJsonRetries
   )) as Record<string, unknown>;
 
   const hypotheses = validateHypotheses(rawAnalyse.hypotheses);
@@ -686,6 +712,7 @@ export async function runCase(
     actors: actors.value,
     hypotheses: hypotheses.value,
     leverage: leverage.value,
+    knowledgeCards: input.knowledgeBlock || undefined,
   });
   const rawPlan = (await stage(
     transport,
@@ -694,7 +721,9 @@ export async function runCase(
     strategiseSpec,
     strategisePrompt(sentinel, language, jurisdiction),
     strategiseInput,
-    STRATEGISE_SCHEMA
+    STRATEGISE_SCHEMA,
+    input.execution?.reasoning?.strategise,
+    input.execution?.maxJsonRetries
   )) as Record<string, unknown>;
 
   const strategies = validateStrategies(rawPlan.strategies);
@@ -1005,6 +1034,7 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
     responseLanguage: input.responseLanguage,
     jurisdiction,
     includeClarify: !input.skipClarify && !answersBlock,
+    execution: input.execution,
   });
   const preflightCap = input.preflightCapUsd ?? capUsd;
   if (projected > preflightCap) {
@@ -1023,14 +1053,16 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
       clarifySpec,
       clarifyPrompt(sentinel, language, jurisdiction),
       fence("ACCOUNT", input.account, sentinel),
-      CLARIFY_SCHEMA as unknown as { name: string; schema: Record<string, unknown> }
+      CLARIFY_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
+      input.execution?.reasoning?.clarify,
+      input.execution?.maxJsonRetries
     );
     const gate = validateClarify(raw);
     if (!gate.ready) return { kind: "questions", questions: gate.questions, ledger };
   }
 
   // ---- private analysis
-  const configId = ANALYSIS_CONFIG[mode];
+  const configId = input.execution?.analysisConfigurationId ?? ANALYSIS_CONFIG[mode];
   let analysis: CaseAnalysis | null = null;
   let brief: AnalysisBrief | null = null;
   let problems: string[] = [];
@@ -1063,14 +1095,19 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
   }
 
   // ---- the adviser
-  const finalSpec = modelFor(resolveConfiguration(DEFAULT_CONFIGURATION), "strategise");
+  const defaultFinal = resolveConfiguration(DEFAULT_CONFIGURATION);
+  const finalConfig = input.execution?.finalModelKey
+    ? { ...defaultFinal, id: "manual-final", roles: { ...defaultFinal.roles, strategise: input.execution.finalModelKey } }
+    : defaultFinal;
+  const finalSpec = modelFor(finalConfig, "strategise");
   const answer = await textStage(
     transport,
     ledger,
     "final",
     finalSpec,
     finalPrompt(sentinel, language, jurisdiction, brief !== null),
-    finalUserMessage(input.account, answersBlock, brief ? renderBrief(brief) : null, sentinel)
+    finalUserMessage(input.account, answersBlock, brief ? renderBrief(brief) : null, sentinel),
+    input.execution?.reasoning?.final
   );
 
   const narrative = checkNarrative(answer);
