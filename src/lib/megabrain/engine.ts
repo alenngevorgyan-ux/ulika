@@ -17,6 +17,7 @@ import { sanitizeExtract, type SanitationWarning } from "./sanitize";
 import { CLARIFY_SCHEMA, clarifyPrompt, formatAnswers, validateClarify, type ClarifyQuestion } from "./clarify";
 import { buildBrief, renderBrief, type AnalysisBrief } from "./brief";
 import { checkNarrative, finalPrompt, finalUserMessage } from "./finalStrategist";
+import { stableGeminiPrompt, stableGeminiUserMessage } from "./stableGemini";
 import { followUpPrompt, followUpUserMessage, type FollowUpAction } from "./followUp";
 import { capFor, ModeNotAvailable, MODES, type AnalysisMode } from "./analysisMode";
 import {
@@ -96,6 +97,8 @@ export interface CaseInput {
   execution?: {
     analysisConfigurationId: string;
     finalModelKey: string;
+    /** Manual Alpha X: skip structured staff work and write one direct answer. */
+    directFinal?: boolean;
     reasoning?: Partial<Record<"clarify" | "extract" | "analyse" | "strategise" | "critic" | "final", ReasoningConfig>>;
     maxJsonRetries?: 0 | 1;
     /**
@@ -391,6 +394,22 @@ export function projectAdvicePipeline(input: {
       clarifyPrompt(sentinel, language, jurisdiction) + fence("ACCOUNT", input.account, sentinel),
       MAX_OUTPUT_TOKENS.clarify
     );
+  }
+
+  if (input.execution?.directFinal) {
+    const finalConfig = {
+      ...defaultConfig,
+      id: "manual-stable-final",
+      roles: { ...defaultConfig.roles, strategise: input.execution.finalModelKey },
+    };
+    const finalText = stableGeminiPrompt(sentinel, language, jurisdiction) +
+      stableGeminiUserMessage(input.account, "", "x".repeat(12_000), sentinel);
+    total += reserve(
+      modelFor(finalConfig, "strategise"),
+      finalText,
+      input.execution.maxOutputTokens?.final ?? MAX_OUTPUT_TOKENS.final
+    );
+    return total;
   }
 
   if (input.mode !== "light") {
@@ -1244,6 +1263,34 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
     );
     const gate = validateClarify(raw);
     if (!gate.ready) return { kind: "questions", questions: gate.questions, ledger };
+  }
+
+  if (input.execution?.directFinal) {
+    const defaultFinal = resolveConfiguration(DEFAULT_CONFIGURATION);
+    const directConfig = {
+      ...defaultFinal,
+      id: "manual-stable-final",
+      roles: { ...defaultFinal.roles, strategise: input.execution.finalModelKey },
+    };
+    const directSpec = modelFor(directConfig, "strategise");
+    pipelineEvent("final_handoff_ready", {
+      final_handoff_ready: true,
+      requested_model: directSpec.slug,
+      brief_chars: 0,
+      brief_token_estimate: 0,
+    });
+    const answer = await textStage(
+      transport,
+      ledger,
+      "final",
+      directSpec,
+      stableGeminiPrompt(sentinel, language, jurisdiction),
+      stableGeminiUserMessage(input.account, answersBlock, input.knowledgeBlock ?? "", sentinel),
+      input.execution.reasoning?.final,
+      input.execution.maxOutputTokens?.final
+    );
+    const narrative = checkNarrative(answer);
+    return { kind: "answer", answer, brief: null, analysis: null, problems: narrative.problems, warnings: [], ledger };
   }
 
   // ---- private analysis

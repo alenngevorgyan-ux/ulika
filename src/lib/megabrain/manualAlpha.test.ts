@@ -30,9 +30,15 @@ const draft = {
 };
 
 describe("Manual Alpha server controls", () => {
-  it("exposes exactly five allowlisted presets and no client-defined model", () => {
-    expect(Object.keys(MANUAL_PRESETS)).toEqual(["A", "B", "C", "D", "E"]);
+  it("exposes only the six allowlisted presets and no client-defined model", () => {
+    expect(Object.keys(MANUAL_PRESETS)).toEqual(["A", "B", "C", "D", "E", "X"]);
     expect(resolveManualPreset("D").execution.finalModelKey).toBe("qwen-3.6-max-preview");
+    expect(resolveManualPreset("X").execution).toMatchObject({
+      directFinal: true,
+      finalModelKey: "gemini-3.1-flash-lite",
+      maxJsonRetries: 0,
+    });
+    expect(resolveManualPreset("X").capUsd).toBe(0.02);
     expect(() => resolveManualPreset("openai/expensive-model")).toThrow("INVALID_MANUAL_PRESET");
     expect(() => resolveManualPreset({ capUsd: 99 })).toThrow("INVALID_MANUAL_PRESET");
   });

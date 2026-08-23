@@ -1,6 +1,6 @@
 import type { CaseInput } from "./engine";
 
-export type ManualPresetId = "A" | "B" | "C" | "D" | "E";
+export type ManualPresetId = "A" | "B" | "C" | "D" | "E" | "X";
 export type ClarificationMode = "normal" | "off" | "fixed";
 export type KnowledgeMode = "off" | "core" | "research";
 export type MemoryMode = "off" | "case" | "saved";
@@ -147,6 +147,22 @@ export const MANUAL_PRESETS: Record<ManualPresetId, ManualPreset> = {
     capUsd: 0.1,
     reasoningReserveMultiplier: 1.25,
     limitation: "Qwen reasoning has no documented strict token-budget control for this endpoint. The hidden artifact is capped at 1,500 visible tokens and accounting reserves 3,500 additional reasoning tokens; the external key remains the only hard monetary stop.",
+  },
+  X: {
+    id: "X",
+    label: "Stable Gemini",
+    purpose: "Fast, stable single-model path with Knowledge Atlas.",
+    execution: {
+      analysisConfigurationId: "all-cheap",
+      finalModelKey: "gemini-3.1-flash-lite",
+      directFinal: true,
+      maxJsonRetries: 0,
+      reasoning: { final: { enabled: false, exclude: true, timeoutMs: 90_000 } },
+      maxOutputTokens: { final: 2_200 },
+    },
+    capUsd: 0.02,
+    reasoningReserveMultiplier: 1,
+    limitation: "Reliability control: no private strategist or critic; NORMAL clarification may add one separate gate call before the single final call.",
   },
 };
 

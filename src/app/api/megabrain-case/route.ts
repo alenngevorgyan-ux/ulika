@@ -27,7 +27,7 @@ import { CostLedger } from "@/lib/megabrain/costLedger";
 import { CaseTooComplexError, projectAdvicePipeline, runAdvice, runFollowUp } from "@/lib/megabrain/engine";
 import { isFollowUpAction } from "@/lib/megabrain/followUp";
 import { formatAnswers } from "@/lib/megabrain/clarify";
-import { projectCaseSafety, screenCaseSafety } from "@/lib/megabrain/caseSafety";
+import { projectCaseSafety, screenCaseSafety, screenCaseSafetyLocally } from "@/lib/megabrain/caseSafety";
 import { buildStaticCrisisReply } from "@/lib/safety/respond";
 import { createOpenRouterTransport } from "@/lib/megabrain/transport";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
@@ -342,16 +342,18 @@ export async function POST(req: NextRequest) {
         truncated: retrieval.truncated,
       };
     }
+    const manualPreset = flow.manual ? resolveManualPreset(flow.manual.preset) : null;
+    const isStableGemini = manualPreset?.execution.directFinal === true;
     const projectedBase = projectAdvicePipeline({
       account: answerBlock ? `${contextualAccount}\n\nУточнения:\n${answerBlock}` : contextualAccount,
       mode: flow.mode,
       responseLanguage: flow.responseLanguage as ResponseLanguage,
       jurisdiction: flow.jurisdiction as Jurisdiction,
       includeClarify,
-      execution: flow.manual ? resolveManualPreset(flow.manual.preset).execution : undefined,
-    }) + (effectiveSafetyText ? projectCaseSafety(effectiveSafetyText) : 0);
+      execution: manualPreset?.execution,
+    }) + (effectiveSafetyText && !isStableGemini ? projectCaseSafety(effectiveSafetyText) : 0);
     const reservations = flow.manual
-      ? manualPreflightReservations(projectedBase, resolveManualPreset(flow.manual.preset))
+      ? manualPreflightReservations(projectedBase, manualPreset!)
       : { softwareUsd: projectedBase, externalUsd: projectedBase };
     if (reservations.softwareUsd > remaining) {
       throw new CaseTooComplexError(flow.mode, reservations.softwareUsd, remaining, null);
@@ -369,7 +371,9 @@ export async function POST(req: NextRequest) {
       }
     }
     if (effectiveSafetyText) {
-      const safety = await screenCaseSafety(effectiveSafetyText, ledger, transport);
+      const safety = isStableGemini
+        ? screenCaseSafetyLocally(effectiveSafetyText)
+        : await screenCaseSafety(effectiveSafetyText, ledger, transport);
       if (safety.triggered && safety.type) {
         addSpend(flow, ledger.budgetedSpendUsd);
         spendCaptured = true;
@@ -389,7 +393,7 @@ export async function POST(req: NextRequest) {
       askedQuestions: flow.questions,
       answers: effectiveAnswers,
       skipClarify,
-      execution: flow.manual ? resolveManualPreset(flow.manual.preset).execution : undefined,
+      execution: manualPreset?.execution,
       knowledgeBlock: retrieval?.block,
     }, transport);
     addSpend(flow, ledger.budgetedSpendUsd);

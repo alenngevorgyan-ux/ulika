@@ -63,10 +63,10 @@ export async function screenCaseSafety(account: string, ledger: CostLedger, tran
   // A malformed classifier response falls back locally; a transport or
   // accounting failure above remains fail-closed and stops the case.
   const valid = parsed && typeof parsed.triggered === "boolean" && (parsed.type === null || type !== null);
-  return valid ? { triggered: parsed.triggered === true && type !== null, type } : localSafetyNet(account);
+  return valid ? { triggered: parsed.triggered === true && type !== null, type } : screenCaseSafetyLocally(account);
 }
 
-function localSafetyNet(text: string): CaseSafetyVerdict {
+export function screenCaseSafetyLocally(text: string): CaseSafetyVerdict {
   const t = text.toLocaleLowerCase();
   const nets: [CrisisType, string[]][] = [
     ["suicide_self_harm", ["kill myself", "want to die", "suicide", "не хочу жить", "хочу умереть", "лучше бы меня не было"]],

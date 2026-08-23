@@ -5,7 +5,7 @@ import { buildTestPacket } from "@/lib/megabrain/testPacket";
 import SignInForm from "@/app/plan/SignInForm";
 
 export interface ManualAlphaSettings {
-  preset: "A" | "B" | "C" | "D" | "E";
+  preset: "A" | "B" | "C" | "D" | "E" | "X";
   clarification: "normal" | "off" | "fixed";
   knowledge: "off" | "core" | "research";
   memory: "off" | "case" | "saved";
