@@ -92,17 +92,22 @@ export const MANUAL_PRESETS: Record<ManualPresetId, ManualPreset> = {
       // needs more (both live runs failed before reaching it).
       maxOutputTokens: { strategise: 4_000 },
     },
-    // Raised from 0.12: that cap was set before any live reasoning-token data
-    // existed. It was never actually the failure mode (total actual spend
-    // across a full attempt was ~$0.047), but the PER-STAGE reservation was:
-    // 3000 visible-only tokens reserved against a real 6237-token bill. With
-    // the reasoning budgets above folded into reservationCeiling(), a full
-    // two-call D pipeline now reserves roughly $0.14 in the worst case
-    // (strategise ~$0.08 + final ~$0.06); 0.20 leaves real margin without
-    // pretending reasoning is unbounded (an unbounded run against this
-    // model's true 65,536-token completion ceiling would be ~$0.4-0.5 — this
-    // cap still means something).
-    capUsd: 0.2,
+    // Raised again, from 0.20 to 0.30: live evidence — a strategise timeout
+    // debits its full conservative reservation (~$0.09) from the cap even
+    // though the real charge is usually far smaller or unknown, because a
+    // timed-out call's true cost can't be trusted. Resume then requests a
+    // FRESH full-pipeline reservation (~$0.16, since Resume currently re-runs
+    // the whole pipeline — extract/safety included — rather than resuming
+    // from just the failed stage). 0.20 - 0.09 = 0.11 < 0.16, so a single
+    // failure always made Resume itself hit CASE_TOO_COMPLEX; observed live.
+    // 0.30 covers one failure plus one fresh resume with real margin.
+    // KNOWN LIMITATION, not fixed here: Resume does not actually resume from
+    // the failed stage — it reruns everything, including already-succeeded
+    // extract. A second consecutive timeout can still exhaust this cap.
+    // Fixing that properly means persisting extract's output on the case
+    // flow so resume can skip it — a durable-schema change, explicitly out
+    // of scope for this task ("do not touch the durable case store").
+    capUsd: 0.3,
     // Lowered from 2.5. That number was calibrated for the OLD software
     // estimate, which silently ignored reasoning entirely (~$0.067 for a
     // typical case) — 2.5x was compensating, blindly, for a risk the

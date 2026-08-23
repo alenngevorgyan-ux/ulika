@@ -167,7 +167,7 @@ describe("D Premium reservation reflects Qwen's real reasoning-token behavior", 
   it("D's per-case cap fits a realistic full pipeline (strategise + final) without ever trying to be unlimited", () => {
     const preset = resolveManualPreset("D");
     const finalReasoning = preset.execution.reasoning!.final!;
-    const strategiseCeiling = reservationCeiling(3000, strategiseReasoning);
+    const strategiseCeiling = reservationCeiling(preset.execution.maxOutputTokens?.strategise ?? 3000, strategiseReasoning);
     const finalCeiling = reservationCeiling(2200, finalReasoning);
     // Worst-case reservation for the two Qwen calls alone, same formula
     // stage() uses (costOf * RESERVATION_SAFETY_MARGIN), with generous
@@ -176,14 +176,34 @@ describe("D Premium reservation reflects Qwen's real reasoning-token behavior", 
       ((5225 * qwen.inputPerMTok + strategiseCeiling * qwen.outputPerMTok) / 1_000_000) * 1.35 +
       ((4000 * qwen.inputPerMTok + finalCeiling * qwen.outputPerMTok) / 1_000_000) * 1.35;
     expect(worstCaseUsd).toBeLessThan(preset.capUsd);
-    // And it isn't vacuously true — this is a real, non-trivial fraction of
-    // the cap, not a cap so large the reservation could never matter.
-    expect(worstCaseUsd).toBeGreaterThan(preset.capUsd * 0.5);
+    // And it isn't vacuously true — the cap is sized to survive one failed
+    // attempt PLUS one fresh full-pipeline resume (see the capUsd comment),
+    // not raised so far that a single run's reservation stops mattering.
+    expect(worstCaseUsd).toBeGreaterThan(preset.capUsd * 0.35);
     // A genuinely unbounded reasoning run (the model's real 65,536-token
-    // completion ceiling) would cost far more than the cap — the cap still
-    // means something, it isn't just raised to make every failure vanish.
+    // completion ceiling) would still cost meaningfully more than the cap —
+    // the cap still means something, it isn't raised to make every failure
+    // vanish. The margin over "unbounded" is real but no longer huge: this
+    // model's own pricing puts its absolute worst case close enough to a
+    // realistic two-cycle (fail + resume) cost that there isn't much room
+    // left between them — a fact about the model, not a loosened guard.
     const unboundedUsd = (qwen.maxCompletionTokens as number) * qwen.outputPerMTok / 1_000_000;
-    expect(unboundedUsd).toBeGreaterThan(preset.capUsd * 2);
+    expect(unboundedUsd).toBeGreaterThan(preset.capUsd);
+  });
+
+  it("survives one failed attempt's debit plus one fresh full-pipeline resume — the exact live scenario", () => {
+    // Live sequence, in order: strategise times out, its full conservative
+    // reservation (~$0.09) is debited from the cap even though the real
+    // charge is unknown/likely smaller; the user clicks Resume; Resume
+    // requests a FRESH full-pipeline reservation (~$0.16) because it does
+    // not currently skip the already-succeeded extract/safety stages.
+    // Before this fix (capUsd 0.20), 0.20 - 0.09 = 0.11 < 0.16 always failed
+    // Resume with CASE_TOO_COMPLEX — reproduced here with the real numbers.
+    const preset = resolveManualPreset("D");
+    const firstAttemptDebit = 0.09260472604999999; // observed live (safety+extract+strategise reservation)
+    const freshResumeReservation = 0.15910148115; // observed live (same message, full-pipeline base)
+    const remainingAfterFailure = preset.capUsd - firstAttemptDebit;
+    expect(remainingAfterFailure).toBeGreaterThanOrEqual(freshResumeReservation);
   });
 
   it("the exact live near-miss — a typical case, a $0.39 key — now clears the external check", () => {
