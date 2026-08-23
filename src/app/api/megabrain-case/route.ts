@@ -27,9 +27,10 @@ import { buildStaticCrisisReply } from "@/lib/safety/respond";
 import { createOpenRouterTransport } from "@/lib/megabrain/transport";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
 import { manualAdminId } from "@/lib/megabrain/manualAccess";
-import { parseClarificationMode, parseKnowledgeMode, parseMemoryMode, resolveManualPreset } from "@/lib/megabrain/manualPresets";
+import { manualPreflightReservations, parseClarificationMode, parseKnowledgeMode, parseMemoryMode, resolveManualPreset } from "@/lib/megabrain/manualPresets";
 import { retrieveManualKnowledge, SOURCE_REGISTRY } from "@/lib/megabrain/manualKnowledge";
 import { getSavedCase, renderSavedContext } from "@/lib/megabrain/savedCases";
+import { buildDiagnostics } from "@/lib/megabrain/labDiagnostics";
 
 export const maxDuration = 300;
 
@@ -296,11 +297,11 @@ export async function POST(req: NextRequest) {
       includeClarify,
       execution: flow.manual ? resolveManualPreset(flow.manual.preset).execution : undefined,
     }) + (effectiveSafetyText ? projectCaseSafety(effectiveSafetyText) : 0);
-    const projected = flow.manual
-      ? projectedBase * resolveManualPreset(flow.manual.preset).reasoningReserveMultiplier
-      : projectedBase;
-    if (projected > remaining) {
-      throw new CaseTooComplexError(flow.mode, projected, remaining, null);
+    const reservations = flow.manual
+      ? manualPreflightReservations(projectedBase, resolveManualPreset(flow.manual.preset))
+      : { softwareUsd: projectedBase, externalUsd: projectedBase };
+    if (reservations.softwareUsd > remaining) {
+      throw new CaseTooComplexError(flow.mode, reservations.softwareUsd, remaining, null);
     }
     if (flow.manual) {
       const metadata = await fetch("https://openrouter.ai/api/v1/key", {
@@ -310,7 +311,7 @@ export async function POST(req: NextRequest) {
       if (!metadata.ok) throw new FlowError("EXTERNAL_BUDGET_UNVERIFIED", 503);
       const payload = await metadata.json() as { data?: { limit?: number; usage?: number; limit_remaining?: number } };
       const externalRemaining = Number(payload.data?.limit_remaining ?? (Number(payload.data?.limit) - Number(payload.data?.usage)));
-      if (!Number.isFinite(externalRemaining) || externalRemaining - projected < 0.01) {
+      if (!Number.isFinite(externalRemaining) || externalRemaining - reservations.externalUsd < 0.01) {
         throw new FlowError("EXTERNAL_BUDGET_TOO_LOW", 400);
       }
     }
@@ -358,6 +359,18 @@ export async function POST(req: NextRequest) {
     }
     return response(flow);
   } catch (e) {
+    const diagnostics = buildDiagnostics(e, {
+      ledger: operationLedger ?? undefined,
+      currentStage: operationLedger?.allDeep().at(-1)?.stage ?? "preflight",
+      capUsd: flow?.capUsd ?? 0,
+    });
+    console.error("megabrain-case failure", JSON.stringify({
+      code: e instanceof FlowError ? e.code : safeCode(e),
+      errorClass: e instanceof Error ? e.name : "UnknownError",
+      preset: flow?.manual?.preset ?? null,
+      lastModel: operationLedger?.allDeep().at(-1)?.model ?? null,
+      ...diagnostics,
+    }));
     if (flow && requestId) {
       if (operationLedger && !spendCaptured) {
         addSpend(flow, operationLedger.budgetedSpendUsd);

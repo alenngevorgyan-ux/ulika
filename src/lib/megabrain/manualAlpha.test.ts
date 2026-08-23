@@ -2,7 +2,9 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MANUAL_PRESETS, parseKnowledgeMode, resolveManualPreset } from "./manualPresets";
+import { MANUAL_PRESETS, manualPreflightReservations, parseKnowledgeMode, resolveManualPreset } from "./manualPresets";
+import { projectAdvicePipeline } from "./engine";
+import { projectCaseSafety } from "./caseSafety";
 import { fullTextAllowed, retrieveManualKnowledge, SOURCE_REGISTRY } from "./manualKnowledge";
 import { getSavedCase, listSavedCases, saveCase } from "./savedCases";
 import { buildTestPacket } from "./testPacket";
@@ -31,6 +33,24 @@ describe("Manual Alpha server controls", () => {
     expect(resolveManualPreset("D").execution.finalModelKey).toBe("qwen-3.6-max-preview");
     expect(() => resolveManualPreset("openai/expensive-model")).toThrow("INVALID_MANUAL_PRESET");
     expect(() => resolveManualPreset({ capUsd: 99 })).toThrow("INVALID_MANUAL_PRESET");
+  });
+
+  it("keeps Premium software reserve inside its cap while applying reasoning buffer only to the external key", () => {
+    const preset = resolveManualPreset("D");
+    const account = "A long but synthetic real-world situation. ".repeat(120);
+    const base = projectAdvicePipeline({
+      account,
+      mode: "standard",
+      responseLanguage: "en",
+      jurisdiction: { country: "unknown" },
+      includeClarify: true,
+      execution: preset.execution,
+    }) + projectCaseSafety(account);
+    const reservation = manualPreflightReservations(base, preset);
+    expect(reservation.softwareUsd).toBe(base);
+    expect(reservation.softwareUsd).toBeLessThanOrEqual(preset.capUsd);
+    expect(reservation.externalUsd).toBeCloseTo(base * 2.5, 10);
+    expect(reservation.externalUsd).toBeGreaterThan(preset.capUsd);
   });
 
   it("Knowledge OFF performs no retrieval and REFERENCE_ONLY never enters full text", () => {
@@ -76,6 +96,7 @@ describe("Manual Alpha server controls", () => {
     expect(chatPage).toContain('const manualRoute = manualSettings !== null');
     expect(chatPage).toContain('manualRoute ? "standard"');
     expect(chatPage).toContain('Request failed · ${diagnostic}');
+    expect(chatPage).toContain('code.includes("TOO_COMPLEX")');
   });
 });
 

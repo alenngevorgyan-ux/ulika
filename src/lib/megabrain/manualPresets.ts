@@ -106,6 +106,25 @@ export function resolveManualPreset(raw: unknown): ManualPreset {
   return preset;
 }
 
+/**
+ * Keep the server software envelope and the provider-specific reasoning buffer
+ * separate. The normal projection is what CostLedger can enforce before each
+ * call. The larger figure is only for checking the external key: providers may
+ * bill native reasoning outside the ordinary visible-output ceiling.
+ *
+ * Multiplying the software projection itself made every Premium request
+ * impossible ($0.17 reserved against a $0.12 envelope) before any stage ran.
+ */
+export function manualPreflightReservations(
+  projectedBaseUsd: number,
+  preset: ManualPreset
+): { softwareUsd: number; externalUsd: number } {
+  return {
+    softwareUsd: projectedBaseUsd,
+    externalUsd: projectedBaseUsd * preset.reasoningReserveMultiplier,
+  };
+}
+
 export function parseClarificationMode(raw: unknown): ClarificationMode {
   if (raw === "normal" || raw === "off" || raw === "fixed") return raw;
   throw new Error("INVALID_CLARIFICATION_MODE");

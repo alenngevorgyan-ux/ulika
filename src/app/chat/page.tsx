@@ -248,7 +248,7 @@ export default function ChatPage() {
           const code = String(data.error ?? "PIPELINE");
           const diagnostic = code.includes("AUTH") || code.includes("FORBIDDEN")
             ? "AUTH"
-            : code.includes("BUDGET") || code.includes("CAP") || code.includes("CREDIT")
+            : code.includes("BUDGET") || code.includes("CAP") || code.includes("CREDIT") || code.includes("TOO_COMPLEX")
               ? "BUDGET_GATE"
               : code.includes("RETRIEV") || code.includes("KNOWLEDGE")
                 ? "RETRIEVAL"
