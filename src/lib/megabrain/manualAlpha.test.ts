@@ -54,15 +54,19 @@ describe("Manual Alpha server controls", () => {
   });
 
   it("keeps the admin allowlist gate while offering host-local sign-in to Preview guests", async () => {
-    const [access, route, panel] = await Promise.all([
+    const [access, route, labRoute, panel] = await Promise.all([
       readFile(join(process.cwd(), "src/lib/megabrain/manualAccess.ts"), "utf8"),
       readFile(join(process.cwd(), "src/app/api/megabrain-manual/route.ts"), "utf8"),
+      readFile(join(process.cwd(), "src/app/api/megabrain-lab/route.ts"), "utf8"),
       readFile(join(process.cwd(), "src/components/chat/ManualAlphaPanel.tsx"), "utf8"),
     ]);
     expect(access).toContain('from("app_admins")');
     expect(access).toContain('status: "denied"');
     expect(route).toContain('status: 401');
     expect(route).toContain('error: "AUTH_REQUIRED"');
+    const labGet = labRoute.slice(labRoute.indexOf("export async function GET"));
+    expect(labGet).toContain("manualAdminId()");
+    expect(labGet).toContain('error: "FORBIDDEN"');
     expect(panel).toContain('<SignInForm returnTo="/chat" compact />');
     expect(panel).toContain('data-testid="manual-alpha-panel"');
     expect(panel).toContain("config.presets.map");

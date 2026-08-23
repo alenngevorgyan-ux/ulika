@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase/server";
 import { labEnabled, resolveModelChoice, ModelChoiceRejected } from "@/lib/megabrain/labAccess";
+import { manualAdminId } from "@/lib/megabrain/manualAccess";
 import { capFor, MODES, ModeNotAvailable, type AnalysisMode } from "@/lib/megabrain/analysisMode";
 import { CostLedger } from "@/lib/megabrain/costLedger";
 import { RunRecorder, describeFailure } from "@/lib/megabrain/runRecorder";
@@ -325,6 +326,7 @@ export async function POST(req: NextRequest) {
 /** Pre-flight numbers for the page, so a cost is shown before anything is spent. */
 export async function GET() {
   if (!labEnabled()) return new NextResponse("Not found", { status: 404 });
+  if (!await manualAdminId()) return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
   return NextResponse.json({
     modes: Object.values(MODES).map((m) => ({
       id: m.id, label: m.label, capUsd: m.capUsd, maxModelCalls: m.maxModelCalls,
