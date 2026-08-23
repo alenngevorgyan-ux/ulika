@@ -51,6 +51,7 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
   const [notesOpen, setNotesOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [access, setAccess] = useState<"loading" | "guest" | "hidden">("loading");
+  const [desktopOpen, setDesktopOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,8 +173,13 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
         </section>
       </div>}
 
-    <section className="hidden md:block mb-3 rounded-lg border border-accent/40 bg-panel p-3 text-xs space-y-3" data-testid="manual-alpha-panel">
-      <div><span className="font-mono text-accent">MANUAL ALPHA</span> · admin-only · calls happen only on Send/Compare</div>
+    <section className="hidden md:block mb-3 rounded-lg border border-accent/40 bg-panel p-3 text-xs" data-testid="manual-alpha-panel">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0"><span className="font-mono text-accent">MANUAL ALPHA</span><span className="text-muted"> · {settings.preset} {activePreset?.label} · {settings.knowledge.toUpperCase()} · {settings.clarification.toUpperCase()}</span></div>
+        <button type="button" onClick={() => setDesktopOpen((open) => !open)} aria-expanded={desktopOpen} className="min-h-10 shrink-0 rounded-full border border-accent/50 px-3 text-accent">{desktopOpen ? "Close" : "Controls"} {desktopOpen ? "↑" : "↓"}</button>
+      </div>
+      {desktopOpen && <div className="mt-3 space-y-3">
+      <div className="text-muted">Admin-only · Manual Alpha overrides the product mode · calls happen only on Send/Compare</div>
       <fieldset><legend className="mb-1 font-medium">Model preset</legend><div className="grid grid-cols-5 gap-2">{config.presets.map((preset) => <button key={preset.id} type="button" onClick={() => update("preset", preset.id)} aria-pressed={settings.preset === preset.id} className={`min-h-12 rounded-md border px-2 text-left transition-colors ${settings.preset === preset.id ? "border-accent bg-accent/10 text-foreground" : "border-panel-border bg-background text-muted hover:border-accent/60"}`}><span className="mr-1 font-mono text-accent">{preset.id}</span><span>{preset.label}</span></button>)}</div></fieldset>
       <div className="grid grid-cols-3 gap-2">
         <label>Clarification<select value={settings.clarification} onChange={(e) => update("clarification", e.target.value as ManualAlphaSettings["clarification"])} className="block w-full bg-background border border-panel-border rounded p-1 mt-1"><option value="normal">NORMAL</option><option value="off">OFF</option><option value="fixed">FIXED</option></select></label>
@@ -188,6 +194,7 @@ export default function ManualAlphaPanel({ flow, originalCase, messages, questio
       {flow?.manual?.telemetry && <details><summary>Cost and latency</summary><div className="mt-2 text-muted">Actual ${flow.manual.telemetry.reportedSpendUsd.toFixed(6)} · conservative ${flow.manual.telemetry.conservativeSpendUsd.toFixed(6)} · {flow.manual.telemetry.latencyMs} ms{flow.manual.telemetry.calls.map((call, i) => <div key={`${call.stage}-${i}`}>{call.stage}: {call.model} · in {call.inputTokens} · reasoning {call.reasoningTokens} · out {call.outputTokens} · {call.cost === null ? "cost unavailable" : `$${call.cost.toFixed(6)}`}</div>)}</div></details>}
       {flow?.phase === "completed" && <div className="space-y-2 border-t border-panel-border pt-2"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Saved case title" className="w-full bg-background border border-panel-border rounded p-1"/><textarea value={actionsTaken} onChange={(e) => setActionsTaken(e.target.value)} placeholder="What did I actually do?" className="w-full bg-background border border-panel-border rounded p-1"/><textarea value={observedOutcome} onChange={(e) => setObservedOutcome(e.target.value)} placeholder="What happened later?" className="w-full bg-background border border-panel-border rounded p-1"/><div className="flex gap-2"><select value={useful} onChange={(e) => setUseful(e.target.value as typeof useful)}><option value="">Useful?</option><option>YES</option><option>MIXED</option><option>NO</option></select><select value={moment} onChange={(e) => setMoment(e.target.value as typeof moment)}><option value="">Megabrain moment?</option><option>YES</option><option>NO</option></select><button onClick={save} disabled={busy || !config.savedCasePersistence.available}>Save this case</button><button onClick={() => copyPacket()}>Copy Test Packet</button></div></div>}
       <details><summary>Blind Compare</summary><div className="mt-2 space-y-2"><div className="flex flex-wrap gap-2">{config.presets.map((p) => <label key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={(e) => setSelected((current) => e.target.checked ? [...current, p.id].slice(0, 5) : current.filter((id) => id !== p.id))}/> {p.id}</label>)}</div><button onClick={estimateCompare}>Estimate maximum</button>{estimate !== null && <span> Conservative maximum: ${estimate.toFixed(4)}</span>}<button onClick={compare} disabled={!canCompare || busy}>Compare (paid, explicit)</button>{variants.map((v) => <article key={v.label} className="border border-panel-border rounded p-2"><h4>{v.label}{revealed[v.label] ? ` — ${revealed[v.label].preset}` : ""}</h4><div className="whitespace-pre-wrap mt-1">{v.answer}</div><label><input type="radio" name="blind-winner" value={v.label} checked={winner === v.label} onChange={() => setWinner(v.label)}/> choose winner</label> <button onClick={() => copyPacket(v)}>Copy Test Packet</button></article>)}{compareId && <button onClick={reveal} disabled={!winner}>Reveal after choosing</button>}</div></details>
+      </div>}
     </section>
     {copied && <div className="fixed bottom-24 left-1/2 z-[90] -translate-x-1/2 rounded-full bg-foreground px-4 py-2 text-sm text-background shadow-xl" role="status">Copied</div>}
     </>

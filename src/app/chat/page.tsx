@@ -222,7 +222,10 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const selectedMode = active.analysisMode ?? "normal";
+      // Manual Alpha is an explicit, founder-only routing layer. Its server-owned
+      // preset must never be silently bypassed by the ordinary product selector.
+      const manualRoute = manualSettings !== null;
+      const selectedMode = manualRoute ? "standard" : (active.analysisMode ?? "normal");
       const res = await fetch(selectedMode === "normal" ? "/api/chat" : "/api/megabrain-case", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -239,12 +242,24 @@ export default function ChatPage() {
               ...(manualSettings ? { manual: manualSettings } : {}),
             }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({ error: "RUNTIME" }));
       if (selectedMode !== "normal") {
         if (!res.ok || !data.flow) {
-          const errorText = data.error === "AUTH_REQUIRED"
-            ? "Войдите в аккаунт, чтобы открыть стратегическое дело. Обычный чат доступен без входа."
-            : "Не удалось продолжить стратегическое дело. Попробуйте ещё раз.";
+          const code = String(data.error ?? "PIPELINE");
+          const diagnostic = code.includes("AUTH") || code.includes("FORBIDDEN")
+            ? "AUTH"
+            : code.includes("BUDGET") || code.includes("CAP") || code.includes("CREDIT")
+              ? "BUDGET_GATE"
+              : code.includes("RETRIEV") || code.includes("KNOWLEDGE")
+                ? "RETRIEVAL"
+                : code.includes("PROVIDER") || code.includes("MODEL") || code.includes("OUTPUT") || code.includes("ACCOUNTING")
+                  ? "PROVIDER"
+                  : "PIPELINE";
+          const errorText = manualRoute
+            ? `Request failed · ${diagnostic}`
+            : data.error === "AUTH_REQUIRED"
+              ? "Войдите в аккаунт, чтобы открыть стратегическое дело. Обычный чат доступен без входа."
+              : "Не удалось продолжить стратегическое дело. Попробуйте ещё раз.";
           persist(withUser.map((c) => c.id === active.id
             ? { ...c, messages: [...nextMessages, { role: "assistant", source: "megabrain", content: errorText }], updatedAt: Date.now() }
             : c));
@@ -282,7 +297,7 @@ export default function ChatPage() {
     } catch {
       const done = [
         ...nextMessages,
-        { role: "assistant" as const, content: "Couldn't reach me just now. Check your connection." },
+        { role: "assistant" as const, content: manualSettings ? "Request failed · NETWORK" : "Couldn't reach me just now. Check your connection." },
       ];
       persist(
         withUser.map((c) =>
@@ -505,7 +520,7 @@ export default function ChatPage() {
           </p>
         )}
 
-        <div className="hidden md:flex flex-wrap gap-2 mb-2">
+        {!manualSettings && <div className="hidden md:flex flex-wrap gap-2 mb-2">
           {[
             ["normal", "Обычный чат", true], ["light", "Быстро", true], ["standard", "Разобрать", true],
             ["strong", "Сильный ход", true], ["deep", "Глубокое дело", false],
@@ -516,25 +531,24 @@ export default function ChatPage() {
               {String(label)}{!available ? " — скоро" : ""}
             </button>
           ))}
-        </div>
-
+        </div>}
         {showLatest && <button type="button" onClick={() => { nearBottomRef.current = true; bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }} className="absolute bottom-36 md:bottom-24 left-1/2 -translate-x-1/2 z-20 rounded-full border border-panel-border bg-panel px-3 py-2 text-xs shadow-lg" aria-label="Jump to latest message">↓ latest</button>}
         <div className="shrink-0 border-t border-panel-border bg-background/95 backdrop-blur -mx-3 sm:-mx-4 md:mx-0 px-3 sm:px-4 md:px-0 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:border-0 md:bg-transparent md:pt-0 md:pb-0">
-          <div className="md:hidden flex gap-1.5 overflow-x-auto pb-2 [scrollbar-width:none]" aria-label="Analysis mode">{[["normal", "Chat"], ["light", "Quick"], ["standard", "Case"], ["strong", "Strong"]].map(([id, label]) => <button key={id} type="button" disabled={loading} onClick={() => active && updateConversation(active.id, (c) => ({ ...c, analysisMode: id as ChatAnalysisMode, caseFlow: undefined }))} className={`min-h-11 shrink-0 rounded-full border px-3 text-xs ${active?.analysisMode === id || (!active?.analysisMode && id === "normal") ? "border-accent text-accent" : "border-panel-border text-muted"}`}>{label}</button>)}</div>
+          {!manualSettings && <div className="md:hidden flex gap-1.5 overflow-x-auto pb-2 [scrollbar-width:none]" aria-label="Analysis mode">{[["normal", "Chat"], ["light", "Quick"], ["standard", "Case"], ["strong", "Strong"]].map(([id, label]) => <button key={id} type="button" disabled={loading} onClick={() => active && updateConversation(active.id, (c) => ({ ...c, analysisMode: id as ChatAnalysisMode, caseFlow: undefined }))} className={`min-h-11 shrink-0 rounded-full border px-3 text-xs ${active?.analysisMode === id || (!active?.analysisMode && id === "normal") ? "border-accent text-accent" : "border-panel-border text-muted"}`}>{label}</button>)}</div>}
           <div className="flex min-w-0 items-end gap-2">
           <textarea
             ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && (e.preventDefault(), void send())}
-            disabled={loading || (active?.analysisMode !== "normal" && Boolean(active?.caseFlow))}
-            placeholder={active?.analysisMode !== "normal" && active?.caseFlow ? "Продолжите дело кнопками выше." : "Say it plainly."}
+            disabled={loading || (Boolean(manualSettings || active?.analysisMode !== "normal") && Boolean(active?.caseFlow))}
+            placeholder={(manualSettings || active?.analysisMode !== "normal") && active?.caseFlow ? "Продолжите дело кнопками выше." : "Say it plainly."}
             rows={1}
             className="min-h-12 max-h-44 min-w-0 flex-1 resize-none overflow-y-auto bg-panel border border-panel-border rounded-2xl px-4 py-3 text-base md:text-sm leading-6 outline-none focus:border-accent"
           />
           <button
             onClick={send}
-            disabled={loading || (active?.analysisMode !== "normal" && Boolean(active?.caseFlow))}
+            disabled={loading || (Boolean(manualSettings || active?.analysisMode !== "normal") && Boolean(active?.caseFlow))}
             aria-label="Send message"
             className="min-h-12 min-w-12 bg-accent text-background font-medium px-3 md:px-5 py-3 rounded-full md:rounded-md text-lg md:text-sm hover:opacity-90 transition-opacity disabled:opacity-50"
           >
