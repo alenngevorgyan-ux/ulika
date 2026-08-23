@@ -463,6 +463,52 @@ export class CostLedger {
     if (failure) throw new AccountingError(stage, failure, "", fromProvider);
     return entry;
   }
+
+  /**
+   * Record a request that was sent but ended before provider usage arrived.
+   * The reservation is debited conservatively; it is never presented as an
+   * actual provider charge.
+   */
+  recordUnreportedAttempt(args: {
+    stage: string;
+    spec: ModelSpec;
+    inputTokens: number;
+    latencyMs: number;
+    attemptId: string;
+    retryNumber: number;
+    reservedUsd: number;
+  }): LedgerEntry {
+    const entry: LedgerEntry = {
+      attemptId: args.attemptId,
+      retryNumber: args.retryNumber,
+      responseId: null,
+      reportedModel: null,
+      selectedProvider: null,
+      serviceTier: null,
+      routingAttempts: [],
+      validationResult: null,
+      finishReason: null,
+      nativeFinishReason: null,
+      provider: args.spec.provider,
+      model: args.spec.slug,
+      stage: args.stage,
+      inputTokens: args.inputTokens,
+      cachedTokens: 0,
+      reasoningTokens: 0,
+      outputTokens: 0,
+      latencyMs: args.latencyMs,
+      actualCostUsd: null,
+      conservativeEstimateUsd: args.reservedUsd,
+      costSource: "unreported",
+      accountingFailure: null,
+      seq: SEQ++,
+      requestBudgetUsd: this.remainingUsd,
+      stoppedByBudgetGuard: false,
+    };
+    this.entries.push(entry);
+    this.onRecord?.(entry);
+    return entry;
+  }
 }
 
 export interface ProviderUsage {

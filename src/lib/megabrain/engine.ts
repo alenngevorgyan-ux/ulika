@@ -3,7 +3,15 @@ import { BudgetExceededError, CostLedger, MODE_CAPS, RESERVATION_SAFETY_MARGIN, 
 import { assertCeilingSupported, costOf, DEFAULT_CONFIGURATION, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
 import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
 import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
-import { isTruncatedFinish, OutputTruncatedError, parseJsonReply, type ReasoningConfig, type Transport } from "./transport";
+import {
+  isTruncatedFinish,
+  OutputTruncatedError,
+  parseJsonReply,
+  ProviderTimeoutError,
+  timeoutForReasoning,
+  type ReasoningConfig,
+  type Transport,
+} from "./transport";
 import { checkLanguage, resolveLanguage } from "./language";
 import { sanitizeExtract, type SanitationWarning } from "./sanitize";
 import { CLARIFY_SCHEMA, clarifyPrompt, formatAnswers, validateClarify, type ClarifyQuestion } from "./clarify";
@@ -383,21 +391,34 @@ async function stage(
     const attemptId = randomBytes(6).toString("hex");
     // Reservation happens per attempt: a retry costs real money and must be
     // charged against the same cap, or the guard is trivially defeated by one.
-    const { projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
+    const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
       attemptId,
       retryNumber: attempt,
     });
 
-    const result = await transport({
-      modelSlug: spec.slug,
-      system,
-      user,
-      maxOutputTokens,
-      jsonSchema,
-      temperature: 0.6,
-      maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
-      reasoning,
-    });
+    let result;
+    try {
+      result = await transport({
+        stage: name,
+        modelSlug: spec.slug,
+        system,
+        user,
+        maxOutputTokens,
+        jsonSchema,
+        temperature: 0.6,
+        timeoutMs: timeoutForReasoning(reasoning),
+        maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+        reasoning,
+      });
+    } catch (error) {
+      if (error instanceof ProviderTimeoutError) {
+        ledger.recordUnreportedAttempt({
+          stage: name, spec, inputTokens, latencyMs: error.elapsedMs,
+          attemptId, retryNumber: attempt, reservedUsd: projectedUsd,
+        });
+      }
+      throw error;
+    }
     // Throws AccountingError on a malformed cost, an overcharge or a routing
     // change. That stops the pipeline before the NEXT call; it cannot undo this
     // one, and nothing here pretends otherwise.
@@ -463,19 +484,32 @@ async function textStage(
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
   assertCeilingSupported(spec, maxOutputTokens);
   const attemptId = randomBytes(6).toString("hex");
-  const { projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
+  const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
     attemptId,
     retryNumber: 0,
   });
-  const result = await transport({
-    modelSlug: spec.slug,
-    system,
-    user,
-    maxOutputTokens,
-    temperature: 0.7,
-    maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
-    reasoning,
-  });
+  let result;
+  try {
+    result = await transport({
+      stage: name,
+      modelSlug: spec.slug,
+      system,
+      user,
+      maxOutputTokens,
+      temperature: 0.7,
+      timeoutMs: timeoutForReasoning(reasoning),
+      maxPrice: { promptPerMTok: spec.inputPerMTok, completionPerMTok: spec.outputPerMTok },
+      reasoning,
+    });
+  } catch (error) {
+    if (error instanceof ProviderTimeoutError) {
+      ledger.recordUnreportedAttempt({
+        stage: name, spec, inputTokens, latencyMs: error.elapsedMs,
+        attemptId, retryNumber: 0, reservedUsd: projectedUsd,
+      });
+    }
+    throw error;
+  }
   ledger.record({
     stage: name,
     spec,

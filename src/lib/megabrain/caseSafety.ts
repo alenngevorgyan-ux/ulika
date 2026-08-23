@@ -45,6 +45,7 @@ export async function screenCaseSafety(account: string, ledger: CostLedger, tran
   const attemptId = randomBytes(6).toString("hex");
   const { projectedUsd } = ledger.reserve("safety", spec, SYSTEM + user, CASE_SAFETY_MAX_OUTPUT_TOKENS, { attemptId, retryNumber: 0 });
   const result = await transport({
+    stage: "safety",
     modelSlug: spec.slug,
     system: SYSTEM,
     user,

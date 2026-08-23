@@ -23,6 +23,7 @@ export type LabErrorKind =
   | "BUDGET_EXCEEDED"
   | "ACCOUNTING_ERROR"
   | "PROVIDER_HTTP_ERROR"
+  | "PROVIDER_TIMEOUT"
   | "OUTPUT_TRUNCATED"
   | "LANGUAGE_MISMATCH"
   | "RENDER_ERROR"
@@ -56,6 +57,8 @@ export function normalizeKind(e: unknown): LabErrorKind {
       return "ACCOUNTING_ERROR";
     case "ProviderHttpError":
       return "PROVIDER_HTTP_ERROR";
+    case "ProviderTimeoutError":
+      return "PROVIDER_TIMEOUT";
     case "OutputTruncatedError":
       return "OUTPUT_TRUNCATED";
     default:
@@ -126,6 +129,8 @@ const RECOMMENDATION: Record<LabErrorKind, string> = {
     "Счёт от провайдера разошёлся с ожидаемым или сменилась маршрутизация. Прогон остановлен до следующего вызова; уже сделанный отменить нельзя.",
   PROVIDER_HTTP_ERROR:
     "Провайдер вернул ошибку HTTP. Тело ответа намеренно не читается — смотрите статус, модель и категорию. Денег за отклонённый запрос не списано.",
+  PROVIDER_TIMEOUT:
+    "Наш ограниченный таймер остановил незавершённый запрос к провайдеру. Автоматический повтор не выполнялся; возможное списание отмечено как неизвестное.",
   RENDER_ERROR:
     "Движок отработал успешно, план валиден — упала только отрисовка. Повторный вызов модели не нужен и не выполнялся.",
   INTERNAL_ERROR: "Неклассифицированное исключение. Смотрите журнал прогона: стадия и attempt id записаны по ходу.",

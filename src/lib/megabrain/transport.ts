@@ -22,6 +22,8 @@ export interface ReasoningConfig {
 }
 
 export interface CompletionRequest {
+  /** Safe pipeline label used only for operational telemetry. Never user text. */
+  stage?: string;
   modelSlug: string;
   /** Ceiling prices per million tokens, sent to the provider as a hard bound. */
   maxPrice?: { promptPerMTok: number; completionPerMTok: number };
@@ -208,7 +210,41 @@ export class ProviderHttpError extends Error {
   }
 }
 
-const DEFAULT_TIMEOUT_MS = 90_000;
+export const DEFAULT_TIMEOUT_MS = 90_000;
+/**
+ * Bounded allowance for explicitly reasoning stages.
+ *
+ * Two such calls still fit inside the route's 300-second Vercel ceiling, with
+ * roughly a minute left for safety, extraction and application overhead.
+ */
+export const REASONING_STAGE_TIMEOUT_MS = 120_000;
+
+export function timeoutForReasoning(reasoning?: ReasoningConfig): number | undefined {
+  return reasoning ? REASONING_STAGE_TIMEOUT_MS : undefined;
+}
+
+export class ProviderTimeoutError extends Error {
+  readonly code = "PROVIDER_TIMEOUT";
+  constructor(
+    readonly stage: string,
+    readonly requestedModel: string,
+    readonly elapsedMs: number,
+    readonly timeoutLimitMs: number,
+    readonly abortSource: "transport_timeout" | "fetch_abort",
+    readonly providerRequestStarted: boolean,
+    readonly responseHeadersReceived: boolean,
+    readonly partialUsageAvailable: boolean
+  ) {
+    super(`Provider request timed out during "${stage}" after ${elapsedMs}ms.`);
+    this.name = "ProviderTimeoutError";
+  }
+}
+
+function logProviderLifecycle(event: string, fields: Record<string, unknown>): void {
+  // Strictly operational allowlist at each call site: no prompts, completions,
+  // headers, keys, response bodies or user text are ever passed here.
+  console.info("megabrain-provider", JSON.stringify({ event, ...fields }));
+}
 
 /**
  * Live OpenRouter transport. Constructed explicitly by the benchmark CLI and by
@@ -220,10 +256,30 @@ export function createOpenRouterTransport(apiKey: string): Transport {
 
   return async (req) => {
     const started = Date.now();
+    const stage = req.stage ?? "provider";
+    const timeoutLimitMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), req.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    let timedOut = false;
+    let providerRequestStarted = false;
+    let responseHeadersReceived = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutLimitMs);
 
     try {
+      providerRequestStarted = true;
+      logProviderLifecycle("stage_start", {
+        stage,
+        requested_model: req.modelSlug,
+        elapsed_ms: 0,
+        abort_source: null,
+        timeout_limit_ms: timeoutLimitMs,
+        provider_request_started: true,
+        response_headers_received: false,
+        partial_usage_available: false,
+        streaming: false,
+      });
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -284,6 +340,18 @@ export function createOpenRouterTransport(apiKey: string): Transport {
           usage: { include: true },
         }),
       });
+      responseHeadersReceived = true;
+      logProviderLifecycle("response_headers", {
+        stage,
+        requested_model: req.modelSlug,
+        elapsed_ms: Date.now() - started,
+        timeout_limit_ms: timeoutLimitMs,
+        provider_request_started: true,
+        response_headers_received: true,
+        partial_usage_available: false,
+        http_status: res.status,
+        streaming: false,
+      });
 
       if (!res.ok) {
         // NO PROVIDER BODY. A provider error message routinely quotes the
@@ -306,12 +374,50 @@ export function createOpenRouterTransport(apiKey: string): Transport {
       const content = choices?.[0]?.message?.content;
       if (typeof content !== "string") throw new Error("Provider returned no message content.");
 
+      logProviderLifecycle("stage_complete", {
+        stage,
+        requested_model: req.modelSlug,
+        elapsed_ms: Date.now() - started,
+        timeout_limit_ms: timeoutLimitMs,
+        provider_request_started: true,
+        response_headers_received: true,
+        partial_usage_available: "usage" in data,
+        streaming: false,
+      });
+
       return {
         content,
         usage: readUsage(data),
         latencyMs: Date.now() - started,
         telemetry: readTelemetry(data),
       };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        const elapsedMs = Date.now() - started;
+        const abortSource = timedOut ? "transport_timeout" : "fetch_abort";
+        logProviderLifecycle("stage_abort", {
+          stage,
+          requested_model: req.modelSlug,
+          elapsed_ms: elapsedMs,
+          abort_source: abortSource,
+          timeout_limit_ms: timeoutLimitMs,
+          provider_request_started: providerRequestStarted,
+          response_headers_received: responseHeadersReceived,
+          partial_usage_available: false,
+          streaming: false,
+        });
+        throw new ProviderTimeoutError(
+          stage,
+          req.modelSlug,
+          elapsedMs,
+          timeoutLimitMs,
+          abortSource,
+          providerRequestStarted,
+          responseHeadersReceived,
+          false
+        );
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }

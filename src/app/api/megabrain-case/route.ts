@@ -59,7 +59,7 @@ interface Body {
 
 function safeCode(e: unknown): string {
   const name = e instanceof Error ? e.name : "";
-  if (name === "AbortError") return "PROVIDER_TIMEOUT";
+  if (name === "AbortError" || name === "ProviderTimeoutError") return "PROVIDER_TIMEOUT";
   if (name === "CaseTooComplexError") return "CASE_TOO_COMPLEX";
   if (name === "BudgetExceededError") return "BUDGET_EXCEEDED";
   if (name === "ProviderHttpError") return "PROVIDER_UNAVAILABLE";
@@ -67,6 +67,14 @@ function safeCode(e: unknown): string {
   if (name === "StageRejectedError") return "INVALID_MODEL_OUTPUT";
   if (name === "AccountingError") return "ACCOUNTING_ERROR";
   return "CASE_FAILED";
+}
+
+function safeTimeoutField(e: unknown, key: string): string | number | boolean | null {
+  const value = (e as Record<string, unknown> | null)?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (key === "abortSource" && (value === "transport_timeout" || value === "fetch_abort")) return value;
+  return null;
 }
 
 function response(flow: CaseFlow, status = 200) {
@@ -387,6 +395,12 @@ export async function POST(req: NextRequest) {
       preset: flow?.manual?.preset ?? null,
       lastModel: currentAttempt.model,
       currentAttemptUnreported: Boolean(currentAttempt.id && !operationLedger?.allDeep().some((entry) => entry.attemptId === currentAttempt.id)),
+      abortSource: safeTimeoutField(e, "abortSource"),
+      timeoutLimitMs: safeTimeoutField(e, "timeoutLimitMs"),
+      elapsedMs: safeTimeoutField(e, "elapsedMs"),
+      providerRequestStarted: safeTimeoutField(e, "providerRequestStarted"),
+      responseHeadersReceived: safeTimeoutField(e, "responseHeadersReceived"),
+      partialUsageAvailable: safeTimeoutField(e, "partialUsageAvailable"),
       ...diagnostics,
     }));
     if (flow && requestId) {
