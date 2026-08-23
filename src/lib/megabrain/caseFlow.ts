@@ -91,10 +91,28 @@ export type PublicCaseFlow = Pick<
   manual: null | Pick<NonNullable<CaseFlow["manual"]>, "preset" | "clarification" | "knowledge" | "memory" | "savedCaseId" | "retrieval" | "telemetry">;
 };
 
-const TTL_MS = 30 * 60 * 1000;
-const MAX_FLOWS_PER_OWNER = 10;
-const MAX_FLOWS_TOTAL = 1_000;
-const flows = new Map<string, CaseFlow>();
+/**
+ * Sliding TTL for an ACTIVE case flow (intake through completed/failed).
+ *
+ * This is deliberately separate from src/lib/megabrain/savedCases.ts, which
+ * is the long-term, explicit, user-triggered "Saved Case" memory. An active
+ * flow does not need to survive forever — it needs to survive a refresh, a
+ * different serverless instance, and a few minutes of thinking. 30 minutes
+ * was already the product's chosen window before durable storage; keeping it
+ * unchanged is a deliberate choice, not an oversight.
+ */
+export const TTL_MS = 30 * 60 * 1000;
+
+/**
+ * Per-owner soft cap on concurrently open flows (intake/awaiting_answers/
+ * analysing). The old in-memory store also enforced a MAX_FLOWS_TOTAL across
+ * every user in the process — that global view does not exist once storage is
+ * RLS-scoped Postgres (a user's own JWT can only ever count their own rows,
+ * by design). Dropped, not silently: the abuse surface it covered is now
+ * covered by requiring auth, this per-owner cap, and OpenRouter's own
+ * per-key spend limit.
+ */
+export const MAX_FLOWS_PER_OWNER = 10;
 
 export class FlowError extends Error {
   constructor(readonly code: string, readonly status: number) {
@@ -103,18 +121,12 @@ export class FlowError extends Error {
   }
 }
 
-function touch(flow: CaseFlow, now = Date.now()): void {
+export function touch(flow: CaseFlow, now = Date.now()): void {
   flow.updatedAt = now;
   flow.expiresAt = now + TTL_MS;
 }
 
-function purgeExpired(now = Date.now()): void {
-  for (const [id, flow] of flows) {
-    if (flow.expiresAt <= now) flows.delete(id);
-  }
-}
-
-export function createCaseFlow(input: {
+export function newFlowShape(input: {
   ownerId: string;
   conversationId: string;
   mode: Exclude<AnalysisMode, "deep">;
@@ -125,16 +137,8 @@ export function createCaseFlow(input: {
   capUsd?: number;
   manual?: CaseFlow["manual"];
 }): CaseFlow {
-  purgeExpired();
-  const ownerFlows = [...flows.values()].filter((f) => f.ownerId === input.ownerId);
-  if (ownerFlows.some((f) => f.conversationId === input.conversationId && ["intake", "awaiting_answers", "analysing"].includes(f.phase))) {
-    throw new FlowError("ACTIVE_FLOW_EXISTS", 409);
-  }
-  if (ownerFlows.length >= MAX_FLOWS_PER_OWNER || flows.size >= MAX_FLOWS_TOTAL) {
-    throw new FlowError("FLOW_LIMIT_REACHED", 429);
-  }
   const now = Date.now();
-  const flow: CaseFlow = {
+  return {
     id: randomUUID(),
     ownerId: input.ownerId,
     conversationId: input.conversationId,
@@ -157,47 +161,6 @@ export function createCaseFlow(input: {
     expiresAt: now + TTL_MS,
     manual: input.manual ?? null,
   };
-  flows.set(flow.id, flow);
-  return flow;
-}
-
-export function ownedFlow(id: string, ownerId: string): CaseFlow {
-  purgeExpired();
-  const flow = flows.get(id);
-  if (!flow) throw new FlowError("FLOW_NOT_FOUND", 404);
-  if (flow.ownerId !== ownerId) throw new FlowError("FLOW_FORBIDDEN", 403);
-  touch(flow);
-  return flow;
-}
-
-export function flowForRequest(ownerId: string, requestId: string): CaseFlow | null {
-  purgeExpired();
-  for (const flow of flows.values()) {
-    if (
-      flow.ownerId === ownerId &&
-      (flow.activeRequestId === requestId || flow.completedRequestIds.has(requestId))
-    ) {
-      touch(flow);
-      return flow;
-    }
-  }
-  return null;
-}
-
-export function beginTransition(
-  flow: CaseFlow,
-  requestId: string,
-  allowed: CaseFlowPhase[],
-  next: CaseFlowPhase
-): "started" | "duplicate" {
-  if (flow.completedRequestIds.has(requestId) || flow.activeRequestId === requestId) return "duplicate";
-  if (flow.activeRequestId) throw new FlowError("FLOW_BUSY", 409);
-  if (!allowed.includes(flow.phase)) throw new FlowError("INVALID_FLOW_TRANSITION", 409);
-  flow.activeRequestId = requestId;
-  flow.phase = next;
-  flow.safeError = null;
-  touch(flow);
-  return "started";
 }
 
 export function setQuestions(flow: CaseFlow, questions: ClarifyQuestion[], requestId: string): void {
@@ -315,9 +278,4 @@ export function publicFlow(flow: CaseFlow): PublicCaseFlow {
       telemetry: flow.manual.telemetry ? structuredClone(flow.manual.telemetry) : null,
     } : null,
   };
-}
-
-/** Tests only. Never expose this through a route. */
-export function clearCaseFlowsForTest(): void {
-  flows.clear();
 }

@@ -4,7 +4,9 @@ import { MANUAL_PRESETS, resolveManualPreset } from "@/lib/megabrain/manualPrese
 import { SOURCE_REGISTRY, retrieveManualKnowledge } from "@/lib/megabrain/manualKnowledge";
 import type { Jurisdiction, ResponseLanguage } from "@/lib/megabrain/schemas";
 import { getSavedCase, listSavedCases, saveCase, savedCasePersistence } from "@/lib/megabrain/savedCases";
-import { ownedFlow } from "@/lib/megabrain/caseFlow";
+import { ownedFlow } from "@/lib/megabrain/caseFlowRepo";
+import { SupabaseCaseFlowRepo } from "@/lib/megabrain/caseFlowSupabaseRepo";
+import { getServerSupabase } from "@/lib/supabase/server";
 import { projectAdvicePipeline, runAdvice } from "@/lib/megabrain/engine";
 import { CostLedger } from "@/lib/megabrain/costLedger";
 import { createOpenRouterTransport } from "@/lib/megabrain/transport";
@@ -54,6 +56,9 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const ownerId = await manualAdminId();
   if (!ownerId) return hidden();
+  const supabase = await getServerSupabase();
+  if (!supabase) return hidden();
+  const repo = new SupabaseCaseFlowRepo(supabase);
   let body: Record<string, unknown>;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "BAD_REQUEST" }, { status: 400 }); }
   const action = body.action;
@@ -64,7 +69,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "save") {
-      const flow = ownedFlow(String(body.flowId ?? ""), ownerId);
+      const flow = await ownedFlow(repo, String(body.flowId ?? ""), ownerId);
       if (!flow.manual || flow.phase !== "completed" || !flow.answer) throw new Error("FLOW_NOT_SAVABLE");
       const snapshot = flow.manual.snapshot;
       const includeMessages = body.includeMessages === true;
@@ -104,7 +109,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "compare") {
-      const flow = ownedFlow(String(body.flowId ?? ""), ownerId);
+      const flow = await ownedFlow(repo, String(body.flowId ?? ""), ownerId);
       if (!flow.manual || flow.phase !== "completed") throw new Error("FLOW_NOT_COMPARABLE");
       const ids = Array.isArray(body.presets) ? [...new Set(body.presets)].slice(0, 5) : [];
       if (ids.length < 2) throw new Error("COMPARE_NEEDS_TWO_PRESETS");

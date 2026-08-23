@@ -5,19 +5,24 @@ import {
   acceptAnswers,
   addSpend,
   appendFollowUp,
-  beginTransition,
   completeFlow,
-  createCaseFlow,
   failFlow,
-  flowForRequest,
   FlowError,
-  ownedFlow,
   publicFlow,
   restoreCompletedFlow,
   setQuestions,
   validatedExcerpt,
   type CaseFlow,
 } from "@/lib/megabrain/caseFlow";
+import {
+  beginTransition,
+  createCaseFlow,
+  flowForRequest,
+  ownedFlow,
+  persistFlow,
+  type CaseFlowRepo,
+} from "@/lib/megabrain/caseFlowRepo";
+import { SupabaseCaseFlowRepo } from "@/lib/megabrain/caseFlowSupabaseRepo";
 import { CostLedger } from "@/lib/megabrain/costLedger";
 import { CaseTooComplexError, projectAdvicePipeline, runAdvice, runFollowUp } from "@/lib/megabrain/engine";
 import { isFollowUpAction } from "@/lib/megabrain/followUp";
@@ -81,6 +86,24 @@ function response(flow: CaseFlow, status = 200) {
   return NextResponse.json({ flow: publicFlow(flow) }, { status });
 }
 
+/**
+ * Write-back is best-effort at this point: the response to the caller is
+ * already fully decided, and a transient persistence hiccup here must not
+ * turn a completed/failed answer into a 500 the user never sees. The next
+ * request against this flow (a GET, or another action) will re-read from
+ * storage and simply retry the write via its own final persist.
+ */
+async function persistBestEffort(repo: CaseFlowRepo, flow: CaseFlow): Promise<void> {
+  try {
+    await persistFlow(repo, flow);
+  } catch (persistError) {
+    console.error("megabrain-case persist failure", JSON.stringify({
+      flowId: flow.id,
+      message: persistError instanceof Error ? persistError.message : "unknown",
+    }));
+  }
+}
+
 function captureManualTelemetry(flow: CaseFlow, ledger: CostLedger): void {
   if (!flow.manual) return;
   flow.manual.telemetry = {
@@ -98,11 +121,12 @@ function captureManualTelemetry(flow: CaseFlow, ledger: CostLedger): void {
   };
 }
 
-async function currentUserId(): Promise<string | null> {
+async function requireSession() {
   const supabase = await getServerSupabase();
   if (!supabase) return null;
   const { data: { user } } = await supabase.auth.getUser();
-  return user?.id ?? null;
+  if (!user) return null;
+  return { supabase, ownerId: user.id };
 }
 
 function parseMode(value: unknown): Exclude<AnalysisMode, "deep"> {
@@ -122,11 +146,12 @@ function parseLanguage(value: unknown): ResponseLanguage {
 }
 
 export async function GET(req: NextRequest) {
-  const ownerId = await currentUserId();
-  if (!ownerId) return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  const session = await requireSession();
+  if (!session) return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  const repo = new SupabaseCaseFlowRepo(session.supabase);
   try {
     const id = req.nextUrl.searchParams.get("flowId") ?? "";
-    return response(ownedFlow(id, ownerId));
+    return response(await ownedFlow(repo, id, session.ownerId));
   } catch (e) {
     if (e instanceof FlowError) return NextResponse.json({ error: e.code }, { status: e.status });
     return NextResponse.json({ error: "CASE_FAILED" }, { status: 500 });
@@ -134,8 +159,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const ownerId = await currentUserId();
-  if (!ownerId) return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  const session = await requireSession();
+  if (!session) return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  const { supabase, ownerId } = session;
+  const repo = new SupabaseCaseFlowRepo(supabase);
 
   let body: Body;
   try {
@@ -162,7 +189,7 @@ export async function POST(req: NextRequest) {
     requestId = parseRequestId(body.requestId);
 
     if (action === "create") {
-      const duplicate = flowForRequest(ownerId, requestId);
+      const duplicate = await flowForRequest(repo, ownerId, requestId);
       if (duplicate) return response(duplicate, duplicate.activeRequestId ? 202 : 200);
       const account = String(body.account ?? "").trim().slice(0, 20_000);
       const conversationId = String(body.conversationId ?? "").trim().slice(0, 100);
@@ -204,7 +231,7 @@ export async function POST(req: NextRequest) {
         };
         capUsd = preset.capUsd;
       }
-      flow = createCaseFlow({
+      flow = await createCaseFlow(repo, {
         ownerId,
         conversationId,
         mode,
@@ -218,7 +245,7 @@ export async function POST(req: NextRequest) {
         manual,
       });
     } else {
-      flow = ownedFlow(String(body.flowId ?? ""), ownerId);
+      flow = await ownedFlow(repo, String(body.flowId ?? ""), ownerId);
       if (flow.completedRequestIds.has(requestId) || flow.activeRequestId === requestId) {
         return response(flow, flow.activeRequestId ? 202 : 200);
       }
@@ -232,7 +259,7 @@ export async function POST(req: NextRequest) {
       if (!isFollowUpAction(body.followUpAction)) throw new FlowError("INVALID_FOLLOW_UP", 400);
       if (!flow.answer) throw new FlowError("INVALID_FLOW_TRANSITION", 409);
       const excerpt = validatedExcerpt(flow.answer, body.excerpt);
-      beginTransition(flow, requestId, ["completed"], "analysing");
+      await beginTransition(repo, flow, requestId, ["completed"], "analysing");
       const followLedger = new CostLedger("quick", capFor("light"));
       observeAttempts(followLedger);
       operationLedger = followLedger;
@@ -251,9 +278,11 @@ export async function POST(req: NextRequest) {
           ledger: followLedger,
         }, transport);
         appendFollowUp(flow, body.followUpAction, result.answer, requestId);
+        await persistBestEffort(repo, flow);
         return response(flow);
       } catch (e) {
         restoreCompletedFlow(flow, requestId, safeCode(e));
+        await persistBestEffort(repo, flow);
         return response(flow, 502);
       }
     }
@@ -261,14 +290,14 @@ export async function POST(req: NextRequest) {
     let skipClarify = flow.manual?.clarification === "off" || flow.manual?.clarification === "fixed";
     if (action === "answer") {
       acceptAnswers(flow, body.answers ?? {});
-      beginTransition(flow, requestId, ["awaiting_answers"], "analysing");
+      await beginTransition(repo, flow, requestId, ["awaiting_answers"], "analysing");
     } else if (action === "skip") {
-      beginTransition(flow, requestId, ["awaiting_answers"], "analysing");
+      await beginTransition(repo, flow, requestId, ["awaiting_answers"], "analysing");
       skipClarify = true;
     } else if (action === "resume") {
       const answersComplete = flow.questions.length > 0 && flow.questions.every((question) => Boolean(flow?.answers[question.id]));
       if (!answersComplete) throw new FlowError("ANSWERS_INCOMPLETE", 409);
-      beginTransition(flow, requestId, ["failed"], "analysing");
+      await beginTransition(repo, flow, requestId, ["failed"], "analysing");
       skipClarify = true;
     } else if (action !== "create") {
       throw new FlowError("BAD_REQUEST", 400);
@@ -346,6 +375,7 @@ export async function POST(req: NextRequest) {
         spendCaptured = true;
         captureManualTelemetry(flow, ledger);
         completeFlow(flow, buildStaticCrisisReply(safety.type), requestId);
+        await persistBestEffort(repo, flow);
         return response(flow);
       }
     }
@@ -381,6 +411,7 @@ export async function POST(req: NextRequest) {
       }
       completeFlow(flow, result.answer, requestId);
     }
+    await persistBestEffort(repo, flow);
     return response(flow);
   } catch (e) {
     const diagnostics = buildDiagnostics(e, {
@@ -412,6 +443,7 @@ export async function POST(req: NextRequest) {
       const code = e instanceof FlowError ? e.code : safeCode(e);
       // Validation and stale-transition errors do not mutate a healthy flow.
       if (!(e instanceof FlowError && e.status < 500)) failFlow(flow, requestId, code);
+      await persistBestEffort(repo, flow);
     }
     if (e instanceof FlowError) return NextResponse.json({ error: e.code, ...(flow ? { flow: publicFlow(flow) } : {}) }, { status: e.status });
     return NextResponse.json({ error: safeCode(e), ...(flow ? { flow: publicFlow(flow) } : {}) }, { status: 502 });

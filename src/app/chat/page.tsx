@@ -340,8 +340,14 @@ export default function ChatPage() {
         const diagnostic = data.error === "FLOW_NOT_FOUND" ? "STATE_EXPIRED"
           : String(data.error ?? "PIPELINE").includes("AUTH") ? "AUTH"
             : "PIPELINE";
+        // The server has no record of this flow (genuinely expired, or this
+        // id belongs to nobody the caller can see). Clear it client-side too
+        // — otherwise the old clarification questions/buttons stay rendered
+        // right next to "Request failed", a contradictory state the server
+        // never actually asserted.
         updateConversation(active.id, (c) => ({
           ...c,
+          caseFlow: undefined,
           messages: [...c.messages, { role: "assistant", source: "megabrain", content: `Request failed · ${diagnostic}` }],
           updatedAt: Date.now(),
         }));
