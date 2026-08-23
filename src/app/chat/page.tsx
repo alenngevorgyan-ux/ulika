@@ -169,8 +169,21 @@ export default function ChatPage() {
     const refresh = async () => {
       try {
         const r = await fetch(`/api/megabrain-case?flowId=${encodeURIComponent(flowId)}`);
-        const data = r.ok ? await r.json() : null;
-        if (cancelled || !data?.flow) return;
+        const data = await r.json().catch(() => null);
+        if (cancelled) return;
+        if (!r.ok || !data?.flow) {
+          // The server has no record of this flow — most commonly a stale
+          // reference surviving from before a storage migration, or a
+          // genuinely expired case reopened after the TTL. Either way, an
+          // indefinitely stuck "Continue" affordance across every future
+          // page load is worse than just clearing it: the server is
+          // authoritative, and silence here is exactly the stale-local-state
+          // problem this refresh effect exists to prevent.
+          if (data?.error === "FLOW_NOT_FOUND") {
+            persist((current) => current.map((c) => (c.id === active.id ? { ...c, caseFlow: undefined } : c)));
+          }
+          return;
+        }
         const flow = data.flow as CaseFlowView;
         persist((current) => current.map((c) => {
           if (c.id !== active.id) return c;
