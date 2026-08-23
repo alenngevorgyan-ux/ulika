@@ -5,8 +5,9 @@ import { validateClarify, MAX_QUESTIONS, formatAnswers } from "./clarify";
 import { buildBrief } from "./brief";
 import { checkNarrative } from "./finalStrategist";
 import { modeCost } from "./costReport";
-import { MODES } from "./analysisMode";
+import { MODES, capFor } from "./analysisMode";
 import { projectCaseSafety } from "./caseSafety";
+import { resolveManualPreset } from "./manualPresets";
 import { GOOD_ANALYSIS, adviceTransport } from "./evals/fixtures";
 import type { CompletionRequest } from "./transport";
 
@@ -104,6 +105,29 @@ describe("the analysis is staff work, not the deliverable", () => {
       "case_analysis_and_plan",
       "prose",
     ]);
+  });
+
+  it("a preset with a larger capUsd than its base mode's nominal tier is not silently re-capped internally", async () => {
+    // Live bug, found running D Premium after the reservation fix: runAdvice's
+    // nested runCase() call hardcoded preflightCapUsd to capFor(mode) — the
+    // generic "standard" tier's $0.05 — instead of the caller's real remaining
+    // budget. D's own capUsd (0.20) never reached that inner check, so a
+    // pipeline that legitimately fit D's cap was refused as CASE_TOO_COMPLEX
+    // by a check that had silently substituted a much smaller number.
+    const preset = resolveManualPreset("D");
+    expect(preset.capUsd).toBeGreaterThan(capFor("standard"));
+    const out = await runAdvice(
+      {
+        account: ACCOUNT,
+        analysisMode: "standard",
+        ledger: new CostLedger("standard", preset.capUsd),
+        preflightCapUsd: preset.capUsd,
+        skipClarify: true,
+        execution: preset.execution,
+      },
+      adviceTransport({})
+    );
+    expect(out.kind).toBe("answer");
   });
 
   it("Light buys no private analysis at all", async () => {

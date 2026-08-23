@@ -1144,10 +1144,15 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
       account: answersBlock ? `${input.account}\n\nУточнения:\n${answersBlock}` : input.account,
       configurationId: configId,
       ledger,
-      // The whole-turn preflight above owns complexity refusal. The nested
-      // engine still has the same ledger guard but must not re-label the
-      // remaining envelope as a different statement about case complexity.
-      preflightCapUsd: capUsd,
+      // The whole-turn preflight above owns complexity refusal, and already
+      // used `input.preflightCapUsd ?? capUsd` — the nested engine must use
+      // the SAME cap, not silently re-narrow it back to the base mode's
+      // nominal tier. For ordinary product usage the two are numerically
+      // identical (the caller's remaining budget starts as capFor(mode)
+      // anyway), so this only changes behavior when a manual preset's own
+      // capUsd differs from the mode's nominal cap — exactly the case a
+      // Premium preset with real reasoning cost needs.
+      preflightCapUsd: input.preflightCapUsd ?? capUsd,
     };
     const engine = mode === "strong"
       ? await runStrong(caseInput, transport)
