@@ -51,8 +51,8 @@ describe("Manual Alpha server controls", () => {
     const reservation = manualPreflightReservations(base, preset);
     expect(reservation.softwareUsd).toBe(base);
     expect(reservation.softwareUsd).toBeLessThanOrEqual(preset.capUsd);
-    expect(reservation.externalUsd).toBeCloseTo(base * 2.5, 10);
-    expect(reservation.externalUsd).toBeGreaterThan(preset.capUsd);
+    expect(reservation.externalUsd).toBeCloseTo(base * preset.reasoningReserveMultiplier, 10);
+    expect(reservation.externalUsd).toBeGreaterThan(reservation.softwareUsd);
   });
 });
 
@@ -184,6 +184,19 @@ describe("D Premium reservation reflects Qwen's real reasoning-token behavior", 
     // means something, it isn't just raised to make every failure vanish.
     const unboundedUsd = (qwen.maxCompletionTokens as number) * qwen.outputPerMTok / 1_000_000;
     expect(unboundedUsd).toBeGreaterThan(preset.capUsd * 2);
+  });
+
+  it("the exact live near-miss — a typical case, a $0.39 key — now clears the external check", () => {
+    // Live failure: a real short user message projected to base=$0.159; the
+    // external check (base * old 2.5 multiplier ≈ $0.40) was rejected by a
+    // key that had $0.389 free — comfortably enough for the case itself
+    // (typical actual spend has run $0.02-0.09), just not enough for a 2.5x
+    // margin over an already-margined estimate. Pinned with the real numbers.
+    const preset = resolveManualPreset("D");
+    const base = 0.15910148115;
+    const keyRemaining = 0.38876562400000003;
+    const reservation = manualPreflightReservations(base, preset);
+    expect(keyRemaining - reservation.externalUsd).toBeGreaterThanOrEqual(0.01);
   });
 });
 

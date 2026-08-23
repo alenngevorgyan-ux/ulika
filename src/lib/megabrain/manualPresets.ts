@@ -103,7 +103,20 @@ export const MANUAL_PRESETS: Record<ManualPresetId, ManualPreset> = {
     // model's true 65,536-token completion ceiling would be ~$0.4-0.5 — this
     // cap still means something).
     capUsd: 0.2,
-    reasoningReserveMultiplier: 2.5,
+    // Lowered from 2.5. That number was calibrated for the OLD software
+    // estimate, which silently ignored reasoning entirely (~$0.067 for a
+    // typical case) — 2.5x was compensating, blindly, for a risk the
+    // estimate itself didn't know about. Now that reservationCeiling()
+    // folds D's actual reasoning budgets into the base estimate (~$0.15-0.16
+    // for a typical case), that same risk is already priced in once. Keeping
+    // 2.5x on top double-counted it: base * 2.5 ≈ $0.40, which live-failed
+    // EXTERNAL_BUDGET_TOO_LOW against a key that had $0.39 free — comfortably
+    // enough for the case itself (real spend has run $0.02-0.09 per attempt),
+    // just not enough for a 2.5x margin over an already-margined estimate.
+    // 1.5x keeps real headroom (base * 1.35 per-call margin * 1.5 here ≈ 2x
+    // over the bare model-price arithmetic) without asking the key to carry
+    // slack for a risk that's no longer unaccounted for.
+    reasoningReserveMultiplier: 1.5,
     limitation: "The endpoint bills reasoning as completion tokens beyond max_tokens; reasoning.max_tokens is now sent as an explicit budget, but whether this Alibaba endpoint honors it as a hard limit is unverified — reservations assume it might not. The external per-key limit remains the final hard stop.",
   },
   E: {
