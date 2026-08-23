@@ -83,6 +83,17 @@ describe("D Premium reservation reflects Qwen's real reasoning-token behavior", 
     expect(strategiseReasoning.enabled).toBe(true);
   });
 
+  it("raises strategise's visible-output ceiling for D only — every other preset keeps the shared default", () => {
+    // Live evidence: strategise hit the shared 3000-token visible ceiling on
+    // BOTH live D runs (~3004 visible tokens each time) and genuinely
+    // truncated on one of them.
+    const d = resolveManualPreset("D").execution.maxOutputTokens?.strategise;
+    expect(d).toBeGreaterThan(3000);
+    for (const id of ["A", "B", "C", "E"] as const) {
+      expect(resolveManualPreset(id).execution.maxOutputTokens?.strategise).toBeUndefined();
+    }
+  });
+
   it("reservationCeiling adds the reasoning budget on top of the visible-output ceiling", () => {
     expect(reservationCeiling(3000, strategiseReasoning)).toBe(3000 + strategiseReasoning.maxTokens!);
     // A stage with no reasoning config (A/B/C's default posture) is unaffected.

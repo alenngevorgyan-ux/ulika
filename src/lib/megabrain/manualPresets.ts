@@ -82,6 +82,15 @@ export const MANUAL_PRESETS: Record<ManualPresetId, ManualPreset> = {
         strategise: { enabled: true, exclude: true, maxTokens: 6_000, timeoutMs: 170_000 },
         final: { enabled: true, exclude: true, maxTokens: 4_000, timeoutMs: 90_000 },
       },
+      // Visible-output ceiling, separate from the reasoning budget above.
+      // MAX_OUTPUT_TOKENS.strategise (3000, shared by every preset) was hit on
+      // BOTH live D runs (~3004 visible tokens each time) and caused a real
+      // OUTPUT_TRUNCATED on one of them — Qwen's structured strategise output
+      // genuinely needs more room under this schema, independent of reasoning
+      // depth. Raised for D only; every other preset still uses the shared
+      // 3000. final is left at its shared 2200 — no live evidence yet that it
+      // needs more (both live runs failed before reaching it).
+      maxOutputTokens: { strategise: 4_000 },
     },
     // Raised from 0.12: that cap was set before any live reasoning-token data
     // existed. It was never actually the failure mode (total actual spend

@@ -97,6 +97,16 @@ export interface CaseInput {
     finalModelKey: string;
     reasoning?: Partial<Record<"clarify" | "extract" | "analyse" | "strategise" | "critic" | "final", ReasoningConfig>>;
     maxJsonRetries?: 0 | 1;
+    /**
+     * Per-stage override for the VISIBLE output ceiling (MAX_OUTPUT_TOKENS is
+     * shared across every preset otherwise). Live evidence: D Premium's
+     * strategise call hit MAX_OUTPUT_TOKENS.strategise's 3000-token ceiling on
+     * BOTH live runs (~3004 visible tokens each time) and truncated on one of
+     * them — the schema's natural size for this stage under Qwen genuinely
+     * needs more room, not less reasoning. Unset for every other stage/preset,
+     * so their behavior is unchanged.
+     */
+    maxOutputTokens?: Partial<Record<"clarify" | "extract" | "analyse" | "strategise" | "critic" | "final", number>>;
   };
   /** Compact, retrieved data. It is never promoted to instructions. */
   knowledgeBlock?: string;
@@ -240,11 +250,14 @@ export function projectCasePipeline(p: {
   pipeline?: "three-stage" | "two-stage";
   /** Same reasoning config the strategise call will actually run under, so this projection and stage()'s own reserve() cannot disagree. */
   strategiseReasoning?: ReasoningConfig;
+  /** Same visible-output override the strategise call will actually run under. */
+  strategiseVisibleCeiling?: number;
 }): { perStage: { stage: string; inputTokens: number; maxOutputTokens: number; usd: number }[]; totalUsd: number } {
   const t = estimateTokens;
   const reserved = (spec: ReturnType<typeof modelFor>, inputTokens: number, maxOut: number) =>
     costOf(spec, inputTokens, maxOut) * RESERVATION_SAFETY_MARGIN;
-  const strategiseCeiling = reservationCeiling(MAX_OUTPUT_TOKENS.strategise, p.strategiseReasoning);
+  const strategiseVisible = p.strategiseVisibleCeiling ?? MAX_OUTPUT_TOKENS.strategise;
+  const strategiseCeiling = reservationCeiling(strategiseVisible, p.strategiseReasoning);
 
   const extractIn = t(p.systems.extract + p.account);
   // The frame and actor map arrive as JSON on the next prompt; their worst case
@@ -331,6 +344,7 @@ export function projectAdvicePipeline(input: {
       },
       pipeline: config.pipeline === "two-stage" ? "two-stage" : "three-stage",
       strategiseReasoning: input.execution?.reasoning?.strategise,
+      strategiseVisibleCeiling: input.execution?.maxOutputTokens?.strategise,
     }).totalUsd;
 
     if (input.mode === "strong") {
@@ -356,7 +370,7 @@ export function projectAdvicePipeline(input: {
   total += reserve(
     modelFor(finalConfig, "strategise"),
     finalText,
-    reservationCeiling(MAX_OUTPUT_TOKENS.final, input.execution?.reasoning?.final)
+    reservationCeiling(input.execution?.maxOutputTokens?.final ?? MAX_OUTPUT_TOKENS.final, input.execution?.reasoning?.final)
   );
   return total;
 }
@@ -399,9 +413,10 @@ async function stage(
   user: string,
   jsonSchema: { name: string; schema: Record<string, unknown> },
   reasoning?: ReasoningConfig,
-  maxJsonRetries = MAX_JSON_RETRIES
+  maxJsonRetries = MAX_JSON_RETRIES,
+  visibleCeilingOverride?: number
 ): Promise<unknown> {
-  const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
+  const maxOutputTokens = visibleCeilingOverride ?? MAX_OUTPUT_TOKENS[name];
   const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning);
   /**
    * Checked before the reservation, so an unsendable ceiling costs nothing.
@@ -512,9 +527,10 @@ async function textStage(
   spec: ReturnType<typeof modelFor>,
   system: string,
   user: string,
-  reasoning?: ReasoningConfig
+  reasoning?: ReasoningConfig,
+  visibleCeilingOverride?: number
 ): Promise<string> {
-  const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
+  const maxOutputTokens = visibleCeilingOverride ?? MAX_OUTPUT_TOKENS[name];
   const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning);
   assertCeilingSupported(spec, reservedCeiling);
   const attemptId = randomBytes(6).toString("hex");
@@ -672,6 +688,7 @@ export async function runCase(
     },
     pipeline: configuration.pipeline === "two-stage" ? "two-stage" : "three-stage",
     strategiseReasoning: input.execution?.reasoning?.strategise,
+    strategiseVisibleCeiling: input.execution?.maxOutputTokens?.strategise,
   });
   const preflightCap = input.preflightCapUsd ?? MODE_CAPS[mode];
   if (projection.totalUsd > preflightCap) {
@@ -730,7 +747,8 @@ export async function runCase(
       JSON.stringify({ frame: frame.value, actors: actors.value, knowledgeCards: input.knowledgeBlock || undefined }),
       COMBINED_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
       input.execution?.reasoning?.strategise,
-      input.execution?.maxJsonRetries
+      input.execution?.maxJsonRetries,
+      input.execution?.maxOutputTokens?.strategise
     )) as Record<string, unknown>;
 
     const h = validateHypotheses(raw.hypotheses);
@@ -1181,7 +1199,8 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
     finalSpec,
     finalPrompt(sentinel, language, jurisdiction, brief !== null),
     finalUserMessage(input.account, answersBlock, brief ? renderBrief(brief) : null, sentinel),
-    input.execution?.reasoning?.final
+    input.execution?.reasoning?.final,
+    input.execution?.maxOutputTokens?.final
   );
 
   const narrative = checkNarrative(answer);
