@@ -34,7 +34,7 @@ import { buildDiagnostics } from "@/lib/megabrain/labDiagnostics";
 
 export const maxDuration = 300;
 
-type Action = "create" | "answer" | "skip" | "follow_up";
+type Action = "create" | "answer" | "skip" | "resume" | "follow_up";
 
 interface Body {
   action?: Action;
@@ -59,6 +59,7 @@ interface Body {
 
 function safeCode(e: unknown): string {
   const name = e instanceof Error ? e.name : "";
+  if (name === "AbortError") return "PROVIDER_TIMEOUT";
   if (name === "CaseTooComplexError") return "CASE_TOO_COMPLEX";
   if (name === "BudgetExceededError") return "BUDGET_EXCEEDED";
   if (name === "ProviderHttpError") return "PROVIDER_UNAVAILABLE";
@@ -140,6 +141,14 @@ export async function POST(req: NextRequest) {
   let spendCaptured = false;
   let requestId = "";
   let action: Action | undefined;
+  const currentAttempt: { id: string | null; stage: string | null; model: string | null } = { id: null, stage: null, model: null };
+  const observeAttempts = (ledger: CostLedger) => {
+    ledger.onAttempt = (attempt) => {
+      currentAttempt.id = attempt.attemptId;
+      currentAttempt.stage = attempt.stage;
+      currentAttempt.model = attempt.model;
+    };
+  };
   try {
     action = body.action;
     requestId = parseRequestId(body.requestId);
@@ -217,6 +226,7 @@ export async function POST(req: NextRequest) {
       const excerpt = validatedExcerpt(flow.answer, body.excerpt);
       beginTransition(flow, requestId, ["completed"], "analysing");
       const followLedger = new CostLedger("quick", capFor("light"));
+      observeAttempts(followLedger);
       operationLedger = followLedger;
       try {
         const caseAnswerHistory = [
@@ -247,16 +257,22 @@ export async function POST(req: NextRequest) {
     } else if (action === "skip") {
       beginTransition(flow, requestId, ["awaiting_answers"], "analysing");
       skipClarify = true;
+    } else if (action === "resume") {
+      const answersComplete = flow.questions.length > 0 && flow.questions.every((question) => Boolean(flow?.answers[question.id]));
+      if (!answersComplete) throw new FlowError("ANSWERS_INCOMPLETE", 409);
+      beginTransition(flow, requestId, ["failed"], "analysing");
+      skipClarify = true;
     } else if (action !== "create") {
       throw new FlowError("BAD_REQUEST", 400);
     }
 
     const remaining = Math.max(0, flow.capUsd - flow.budgetedSpendUsd);
     const ledger = new CostLedger("standard", remaining);
+    observeAttempts(ledger);
     operationLedger = ledger;
     const safetyText = action === "create"
       ? flow.account
-      : action === "answer"
+      : action === "answer" || action === "resume"
         ? Object.values(flow.answers).join("\n")
         : "";
     const includeClarify = action === "create" && !skipClarify;
@@ -361,14 +377,16 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     const diagnostics = buildDiagnostics(e, {
       ledger: operationLedger ?? undefined,
-      currentStage: operationLedger?.allDeep().at(-1)?.stage ?? "preflight",
+      currentStage: currentAttempt.stage ?? "preflight",
+      currentAttemptId: currentAttempt.id ?? undefined,
       capUsd: flow?.capUsd ?? 0,
     });
     console.error("megabrain-case failure", JSON.stringify({
       code: e instanceof FlowError ? e.code : safeCode(e),
       errorClass: e instanceof Error ? e.name : "UnknownError",
       preset: flow?.manual?.preset ?? null,
-      lastModel: operationLedger?.allDeep().at(-1)?.model ?? null,
+      lastModel: currentAttempt.model,
+      currentAttemptUnreported: Boolean(currentAttempt.id && !operationLedger?.allDeep().some((entry) => entry.attemptId === currentAttempt.id)),
       ...diagnostics,
     }));
     if (flow && requestId) {
@@ -376,6 +394,7 @@ export async function POST(req: NextRequest) {
         addSpend(flow, operationLedger.budgetedSpendUsd);
         spendCaptured = true;
       }
+      if (operationLedger) captureManualTelemetry(flow, operationLedger);
       const code = e instanceof FlowError ? e.code : safeCode(e);
       // Validation and stale-transition errors do not mutate a healthy flow.
       if (!(e instanceof FlowError && e.status < 500)) failFlow(flow, requestId, code);

@@ -74,10 +74,11 @@ describe("Manual Alpha server controls", () => {
   });
 
   it("keeps the admin allowlist gate while offering host-local sign-in to Preview guests", async () => {
-    const [access, route, labRoute, panel, chatPage] = await Promise.all([
+    const [access, route, labRoute, caseRoute, panel, chatPage] = await Promise.all([
       readFile(join(process.cwd(), "src/lib/megabrain/manualAccess.ts"), "utf8"),
       readFile(join(process.cwd(), "src/app/api/megabrain-manual/route.ts"), "utf8"),
       readFile(join(process.cwd(), "src/app/api/megabrain-lab/route.ts"), "utf8"),
+      readFile(join(process.cwd(), "src/app/api/megabrain-case/route.ts"), "utf8"),
       readFile(join(process.cwd(), "src/components/chat/ManualAlphaPanel.tsx"), "utf8"),
       readFile(join(process.cwd(), "src/app/chat/page.tsx"), "utf8"),
     ]);
@@ -97,6 +98,11 @@ describe("Manual Alpha server controls", () => {
     expect(chatPage).toContain('manualRoute ? "standard"');
     expect(chatPage).toContain('Request failed · ${diagnostic}');
     expect(chatPage).toContain('code.includes("TOO_COMPLEX")');
+    expect(chatPage).toContain('continueCase("resume")');
+    expect(chatPage).toContain("allowedActions?.includes(\"resume\")");
+    expect(caseRoute).toContain('action === "resume"');
+    expect(caseRoute).toContain('["failed"]');
+    expect(caseRoute).toContain("observeAttempts(ledger)");
   });
 });
 

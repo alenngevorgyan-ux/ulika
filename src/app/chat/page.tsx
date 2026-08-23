@@ -22,10 +22,12 @@ interface CaseFlowView {
   phase: "intake" | "awaiting_answers" | "analysing" | "completed" | "failed";
   mode: Exclude<ChatAnalysisMode, "normal" | "deep">;
   questions: { id: string; question: string; options: string[] }[];
+  allowedActions?: ("answer" | "skip" | "resume")[];
   answer: string | null;
   followUps: { action: string; answer: string }[];
   safeError: string | null;
   budgetedSpendUsd?: number;
+  remainingUsd?: number;
   manual?: {
     retrieval?: {
       cards: { id: string; name: string; type: string; sourceIds: string[]; sourceNames: string[]; evidenceStrength: string; relevanceScore: number }[];
@@ -132,6 +134,10 @@ export default function ChatPage() {
   }, []);
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
+  const clarificationComplete = Boolean(active?.caseFlow?.questions.length) && active!.caseFlow!.questions.every((question) => {
+    const selected = caseAnswers[question.id];
+    return selected === "__other" ? Boolean(customAnswers[question.id]?.trim()) : Boolean(selected?.trim());
+  });
   const { state: caseState, stale, send: sendEvent } = useCaseState(activeId);
 
   useEffect(() => {
@@ -310,7 +316,7 @@ export default function ChatPage() {
     }
   }
 
-  async function continueCase(action: "answer" | "skip") {
+  async function continueCase(action: "answer" | "skip" | "resume") {
     if (!active?.caseFlow || loading || sendInFlight.current) return;
     sendInFlight.current = true;
     setLoading(true);
@@ -329,14 +335,26 @@ export default function ChatPage() {
           ...(action === "answer" ? { answers } : {}),
         }),
       });
-      const data = await res.json();
-      if (!data.flow) return;
+      const data = await res.json().catch(() => ({ error: "RUNTIME" }));
+      if (!data.flow) {
+        const diagnostic = data.error === "FLOW_NOT_FOUND" ? "STATE_EXPIRED"
+          : String(data.error ?? "PIPELINE").includes("AUTH") ? "AUTH"
+            : "PIPELINE";
+        updateConversation(active.id, (c) => ({
+          ...c,
+          messages: [...c.messages, { role: "assistant", source: "megabrain", content: `Request failed · ${diagnostic}` }],
+          updatedAt: Date.now(),
+        }));
+        return;
+      }
       const flow = data.flow as CaseFlowView;
-      const answerSummary = action === "skip"
+      const answerSummary = action === "resume"
+        ? null
+        : action === "skip"
         ? "Продолжить без уточнений."
         : Object.values(answers).join(" · ");
       const extra: Message[] = [
-        { role: "user", source: "megabrain", content: answerSummary },
+        ...(answerSummary ? [{ role: "user" as const, source: "megabrain" as const, content: answerSummary }] : []),
         ...(flow.phase === "completed" && flow.answer
           ? [{ role: "assistant" as const, source: "megabrain" as const, content: flow.answer }]
           : []),
@@ -348,6 +366,12 @@ export default function ChatPage() {
       updateConversation(active.id, (c) => applyCaseFlow(c, flow, extra, updatedAt));
       setCaseAnswers({});
       setCustomAnswers({});
+    } catch {
+      updateConversation(active.id, (c) => ({
+        ...c,
+        messages: [...c.messages, { role: "assistant", source: "megabrain", content: "Request failed · NETWORK" }],
+        updatedAt: Date.now(),
+      }));
     } finally {
       sendInFlight.current = false;
       setLoading(false);
@@ -494,11 +518,29 @@ export default function ChatPage() {
                 </fieldset>
               ))}
               <div className="flex flex-col sm:flex-row gap-2">
-                <button type="button" onClick={() => continueCase("answer")} disabled={loading}
-                  className="min-h-11 bg-accent text-background rounded-lg px-4 py-2 text-sm disabled:opacity-50">Продолжить</button>
+                <button type="button" onClick={() => continueCase("answer")} disabled={loading || !clarificationComplete}
+                  className="min-h-11 bg-accent text-background rounded-lg px-4 py-2 text-sm disabled:opacity-50">Продолжить разбор · {manualSettings?.preset ?? "Megabrain"}</button>
                 <button type="button" onClick={() => continueCase("skip")} disabled={loading}
                   className="min-h-11 border border-panel-border rounded-lg px-4 py-2 text-sm text-muted disabled:opacity-50">Продолжить без уточнений</button>
               </div>
+              {active.caseFlow.remainingUsd !== undefined && <p className="text-xs text-muted">Remaining software envelope: ${active.caseFlow.remainingUsd.toFixed(4)}</p>}
+            </div>
+          )}
+          {active?.caseFlow?.phase === "failed" && (
+            <div className="bg-panel border border-panel-border rounded-xl px-3.5 sm:px-4 py-4 max-w-full md:max-w-[92%] space-y-3">
+              <p className="text-sm font-medium">Разбор остановлен · {active.caseFlow.safeError ?? "PIPELINE"}</p>
+              {active.caseFlow.allowedActions?.includes("resume") ? (
+                <>
+                  <p className="text-xs text-muted">Ответы на уточнения сохранены. Продолжение использует то же дело и не повторяет clarification.</p>
+                  <button type="button" onClick={() => continueCase("resume")} disabled={loading}
+                    className="min-h-11 bg-accent text-background rounded-lg px-4 py-2 text-sm disabled:opacity-50">
+                    Продолжить разбор · {manualSettings?.preset ?? "Megabrain"}
+                  </button>
+                  {active.caseFlow.remainingUsd !== undefined && <p className="text-xs text-muted">Remaining software envelope: ${active.caseFlow.remainingUsd.toFixed(4)}</p>}
+                </>
+              ) : (
+                <p className="text-xs text-muted">Продолжение для этого состояния недоступно. Создайте новое дело или обновите страницу для проверки состояния.</p>
+              )}
             </div>
           )}
           {active?.caseFlow?.phase === "completed" && !loading && (
@@ -542,7 +584,11 @@ export default function ChatPage() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && (e.preventDefault(), void send())}
             disabled={loading || (Boolean(manualSettings || active?.analysisMode !== "normal") && Boolean(active?.caseFlow))}
-            placeholder={(manualSettings || active?.analysisMode !== "normal") && active?.caseFlow ? "Продолжите дело кнопками выше." : "Say it plainly."}
+            placeholder={active?.caseFlow?.phase === "failed" && !active.caseFlow.allowedActions?.length
+              ? `Разбор остановлен · ${active.caseFlow.safeError ?? "PIPELINE"}`
+              : (manualSettings || active?.analysisMode !== "normal") && active?.caseFlow
+                ? "Продолжите дело кнопками выше."
+                : "Say it plainly."}
             rows={1}
             className="min-h-12 max-h-44 min-w-0 flex-1 resize-none overflow-y-auto bg-panel border border-panel-border rounded-2xl px-4 py-3 text-base md:text-sm leading-6 outline-none focus:border-accent"
           />

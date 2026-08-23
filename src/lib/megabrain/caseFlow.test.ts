@@ -12,6 +12,7 @@ import {
   publicFlow,
   restoreCompletedFlow,
   setQuestions,
+  failFlow,
   validatedExcerpt,
 } from "./caseFlow";
 import { capFor } from "./analysisMode";
@@ -59,12 +60,62 @@ describe("server-owned case flow", () => {
     expect(flow.phase).toBe("completed");
   });
 
+  it("offers one explicit same-case resume after a post-answer failure", () => {
+    const flow = create();
+    setQuestions(flow, [{
+      id: "q1", question: "Статус?", decisionImpact: { ifA: "A", moveA: "ход X", ifB: "B", moveB: "ход Y" },
+      options: [{ label: "A" }, { label: "B" }],
+    }], "request_0001");
+    acceptAnswers(flow, { q1: "A" });
+    beginTransition(flow, "request_0002", ["awaiting_answers"], "analysing");
+    failFlow(flow, "request_0002", "PROVIDER_TIMEOUT");
+    expect(publicFlow(flow).allowedActions).toEqual(["resume"]);
+    expect(beginTransition(flow, "request_0003", ["failed"], "analysing")).toBe("started");
+    expect(flow.id).toBe(ownedFlow(flow.id, "user-a").id);
+    expect(flow.answers).toEqual({ q1: "A" });
+  });
+
+  it("does not offer resume when clarification answers were never completed", () => {
+    const flow = create();
+    setQuestions(flow, [{ id: "q1", question: "Q", decisionImpact: { ifA: "A", moveA: "X", ifB: "B", moveB: "Y" }, options: [{ label: "A" }] }], "request_0001");
+    beginTransition(flow, "request_0002", ["awaiting_answers"], "analysing");
+    failFlow(flow, "request_0002", "CASE_FAILED");
+    expect(publicFlow(flow).allowedActions).toEqual([]);
+  });
+
+  it("does not offer a paid resume for a non-retryable budget failure", () => {
+    const flow = create();
+    setQuestions(flow, [{ id: "q1", question: "Q", decisionImpact: { ifA: "A", moveA: "X", ifB: "B", moveB: "Y" }, options: [{ label: "A" }] }], "request_0001");
+    acceptAnswers(flow, { q1: "A" });
+    beginTransition(flow, "request_0002", ["awaiting_answers"], "analysing");
+    failFlow(flow, "request_0002", "BUDGET_EXCEEDED");
+    expect(publicFlow(flow).allowedActions).toEqual([]);
+  });
+
   it("rejects invented question ids and stale transitions", () => {
     const flow = create();
     setQuestions(flow, [{ id: "q1", question: "Q", decisionImpact: { ifA: "A", moveA: "ход X", ifB: "B", moveB: "ход Y" }, options: [{ label: "A" }, { label: "B" }] }], "request_0001");
     expect(() => acceptAnswers(flow, { q999: "injection" })).toThrow(/UNKNOWN_QUESTION/);
     expect(() => acceptAnswers(flow, {})).toThrow(/ANSWERS_INCOMPLETE/);
     expect(() => beginTransition(flow, "request_0002", ["completed"], "analysing")).toThrow(/INVALID_FLOW_TRANSITION/);
+  });
+
+  it("requires every question, accepts free text, and preserves skip as an explicit same-case transition", () => {
+    const flow = create();
+    const flowId = flow.id;
+    setQuestions(flow, [
+      { id: "q1", question: "Q1", decisionImpact: { ifA: "A", moveA: "X", ifB: "B", moveB: "Y" }, options: [{ label: "A" }] },
+      { id: "q2", question: "Q2", decisionImpact: { ifA: "A", moveA: "X", ifB: "B", moveB: "Y" }, options: [{ label: "B" }] },
+    ], "request_0001");
+    expect(() => acceptAnswers(flow, { q1: "A" })).toThrow(/ANSWERS_INCOMPLETE/);
+    expect(acceptAnswers(flow, { q1: "A", q2: "Свой свободный ответ" })).toEqual({ q1: "A", q2: "Свой свободный ответ" });
+    expect(flow.id).toBe(flowId);
+
+    clearCaseFlowsForTest();
+    const skipped = create();
+    setQuestions(skipped, [{ id: "q1", question: "Q", decisionImpact: { ifA: "A", moveA: "X", ifB: "B", moveB: "Y" }, options: [{ label: "A" }] }], "request_0001");
+    expect(beginTransition(skipped, "request_0002", ["awaiting_answers"], "analysing")).toBe("started");
+    expect(skipped.id).toBe(ownedFlow(skipped.id, "user-a").id);
   });
 
   it("makes duplicate request ids idempotent and blocks a competing click", () => {

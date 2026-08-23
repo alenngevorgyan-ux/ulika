@@ -12,6 +12,8 @@ export type CaseFlowPhase =
   | "completed"
   | "failed";
 
+export type CaseFlowAction = "answer" | "skip" | "resume";
+
 export interface PublicQuestion {
   id: string;
   question: string;
@@ -83,6 +85,7 @@ export type PublicCaseFlow = Pick<
   "id" | "conversationId" | "phase" | "mode" | "capUsd" | "answer" | "followUps" | "safeError"
 > & {
   questions: PublicQuestion[];
+  allowedActions: CaseFlowAction[];
   budgetedSpendUsd: number;
   remainingUsd: number;
   manual: null | Pick<NonNullable<CaseFlow["manual"]>, "preset" | "clarification" | "knowledge" | "memory" | "savedCaseId" | "retrieval" | "telemetry">;
@@ -278,6 +281,13 @@ export function restoreCompletedFlow(flow: CaseFlow, requestId: string, safeErro
 }
 
 export function publicFlow(flow: CaseFlow): PublicCaseFlow {
+  const hasCompleteAnswers = flow.questions.length > 0 && flow.questions.every((question) => Boolean(flow.answers[question.id]));
+  const retryableFailure = flow.safeError === "PROVIDER_TIMEOUT" || flow.safeError === "PROVIDER_UNAVAILABLE" || flow.safeError === "CASE_FAILED";
+  const allowedActions: CaseFlowAction[] = flow.phase === "awaiting_answers"
+    ? ["answer", "skip"]
+    : flow.phase === "failed" && hasCompleteAnswers && retryableFailure
+      ? ["resume"]
+      : [];
   return {
     id: flow.id,
     conversationId: flow.conversationId,
@@ -291,6 +301,7 @@ export function publicFlow(flow: CaseFlow): PublicCaseFlow {
       question: q.question,
       options: q.options.map((o) => o.label),
     })),
+    allowedActions,
     answer: flow.answer,
     followUps: [...flow.followUps],
     safeError: flow.safeError,
