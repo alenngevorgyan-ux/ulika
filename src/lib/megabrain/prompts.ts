@@ -334,6 +334,23 @@ Then, in the SAME response, continue with the strategist's work:
 ${strategisePrompt(sentinel, lang, jur)}`;
 }
 
+/** Same strategic task, but a compact paid wire artifact for the final editor. */
+export function compactCombinedPrompt(
+  sentinel: string,
+  lang: ResolvedLanguage,
+  jur: Jurisdiction
+): string {
+  return `${combinedPrompt(sentinel, lang, jur)}
+
+OUTPUT COMPACTION OVERRIDE — the strict response schema is authoritative over
+the verbose field lists above. Do the full comparison privately, then emit only
+the fields present in the compact schema: exactly three competing hypotheses,
+at most four leverage points that are actually present, exactly three
+structurally different strategies, one likely countermove for each, and the
+compact plan. Keep every string short and decision-bearing. Do not emit absent
+leverage, duplicated rationale, internal reasoning, or fields outside schema.`;
+}
+
 /**
  * The baseline.
  *

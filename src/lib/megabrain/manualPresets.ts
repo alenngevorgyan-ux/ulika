@@ -136,10 +136,17 @@ export const MANUAL_PRESETS: Record<ManualPresetId, ManualPreset> = {
         strategise: { enabled: true, exclude: true },
         final: { effort: "xhigh", exclude: true },
       },
+      // Qwen's catalogue exposes reasoning but not supports_max_tokens, so an
+      // invented reasoning.max_tokens would be a fake guard. Bound the paid
+      // emitted artifact instead, and reserve a separate accounting allowance
+      // for the observed native thinking surface without serializing it.
+      compactStrategy: true,
+      maxOutputTokens: { strategise: 1_500 },
+      reasoningReservationTokens: { strategise: 3_500 },
     },
     capUsd: 0.1,
-    reasoningReserveMultiplier: 2.25,
-    limitation: "Qwen reasoning is not a strict max_tokens-bounded cost surface.",
+    reasoningReserveMultiplier: 1.25,
+    limitation: "Qwen reasoning has no documented strict token-budget control for this endpoint. The hidden artifact is capped at 1,500 visible tokens and accounting reserves 3,500 additional reasoning tokens; the external key remains the only hard monetary stop.",
   },
 };
 

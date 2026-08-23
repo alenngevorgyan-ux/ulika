@@ -738,7 +738,7 @@ describe("engine orchestration", () => {
   });
   it("fails the run when a stage never returns parseable JSON", async () => {
     await expect(runCase({ account: "x" }, fixtureTransport({ alwaysGarbage: true })))
-      .rejects.toThrow(/no parseable JSON/);
+      .rejects.toThrow(/unparseable structured response/);
   });
   it("gives the baseline the same account and no structure", async () => {
     const calls: CompletionRequest[] = [];

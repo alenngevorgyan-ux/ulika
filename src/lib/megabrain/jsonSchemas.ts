@@ -318,6 +318,101 @@ export const COMBINED_SCHEMA = {
   },
 } as const;
 
+/**
+ * Compact wire artifact for reasoning models.
+ *
+ * This is not a weaker strategy contract. It removes fields that buildBrief()
+ * immediately discards (ten absent leverage entries, verbose denial/retaliation
+ * subfields, duplicated first moves and rationales). The model may reason over
+ * them privately; the paid emitted JSON contains only what reaches the final
+ * strategist.
+ */
+export const COMPACT_COMBINED_SCHEMA = {
+  name: "compact_case_analysis_and_plan",
+  schema: obj({
+    hypotheses: obj({
+      hypotheses: {
+        type: "array",
+        items: obj({
+          claim: { type: "string" },
+          confidence: { type: "string", enum: ["low", "medium", "high"] },
+          discriminatingTest: { type: "string" },
+        }),
+      },
+    }),
+    leverage: obj({
+      points: {
+        type: "array",
+        description: "Only leverage that is actually present and useful now.",
+        items: obj({
+          kind: { type: "string", enum: [...LEVERAGE_KINDS] },
+          description: { type: "string" },
+          risk: { type: "string" },
+          reversibility: {
+            type: "string",
+            enum: ["reversible", "hard_to_reverse", "irreversible"],
+          },
+        }),
+      },
+    }),
+    strategies: obj({
+      strategies: {
+        type: "array",
+        items: obj({
+          kind: { type: "string", enum: [...STRATEGY_KINDS] },
+          summary: { type: "string" },
+          risk: { type: "string", enum: ["green", "yellow", "orange"] },
+          reversible: { type: "boolean" },
+        }),
+      },
+    }),
+    countermoves: obj({
+      countermoves: {
+        type: "array",
+        items: obj({
+          againstStrategy: { type: "string", enum: [...STRATEGY_KINDS] },
+          likelyResponse: { type: "string" },
+        }),
+      },
+    }),
+    plan: obj({
+      conclusion: { type: "string" },
+      recommendedMove: { type: "string" },
+      exactWords: {
+        type: "array",
+        items: obj({
+          role: { type: "string", enum: [...PHRASE_ROLES] },
+          text: { type: "string" },
+          useWhen: { type: "string" },
+          doNotUseWhen: { type: "string" },
+        }),
+      },
+      ifThenBranches: {
+        type: "array",
+        items: obj({
+          if: { type: "string" },
+          then: { type: "string" },
+          stopCondition: { type: "string" },
+        }),
+      },
+      stopSignals: strings("Observable events, not feelings."),
+      fallbackPlan: { type: "string" },
+      risk: { type: "string", enum: ["green", "yellow", "orange"] },
+      riskAssessment: obj({
+        jurisdictionKnown: { type: "boolean" },
+        requestedBenefit: { type: "string" },
+        relevanceToDispute: { type: "string", enum: ["direct", "tangential", "unrelated"] },
+        informationSource: { type: "string", enum: ["user_owned", "shared_with_user", "third_party", "improperly_obtained"] },
+        proceduralChannel: { type: "string", enum: ["formal", "informal", "none"] },
+        reversibility: { type: "string", enum: ["reversible", "hard_to_reverse", "irreversible"] },
+        retaliationRisk: { type: "string", enum: ["low", "medium", "high"] },
+        legalUncertainty: { type: "string" },
+      }),
+      uncertainty: { type: "string" },
+    }),
+  }),
+} as const;
+
 /** Light mode. Five fields, all required, nothing optional to pad with. */
 export const LIGHT_SCHEMA = {
   name: "light_plan",

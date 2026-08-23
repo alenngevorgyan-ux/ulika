@@ -83,15 +83,17 @@ describe("D Premium reservation reflects Qwen's real reasoning-token behavior", 
     expect(strategiseReasoning.enabled).toBe(true);
   });
 
-  it("raises strategise's visible-output ceiling for D only — every other preset keeps the shared default", () => {
+  it("keeps D's expanded artifact separate from E's compact artifact", () => {
     // Live evidence: strategise hit the shared 3000-token visible ceiling on
     // BOTH live D runs (~3004 visible tokens each time) and genuinely
     // truncated on one of them.
     const d = resolveManualPreset("D").execution.maxOutputTokens?.strategise;
     expect(d).toBeGreaterThan(3000);
-    for (const id of ["A", "B", "C", "E"] as const) {
+    for (const id of ["A", "B", "C"] as const) {
       expect(resolveManualPreset(id).execution.maxOutputTokens?.strategise).toBeUndefined();
     }
+    expect(resolveManualPreset("E").execution.maxOutputTokens?.strategise).toBe(1_500);
+    expect(resolveManualPreset("E").execution.compactStrategy).toBe(true);
   });
 
   it("reservationCeiling adds the reasoning budget on top of the visible-output ceiling", () => {

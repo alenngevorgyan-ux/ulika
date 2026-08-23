@@ -261,6 +261,45 @@ function logProviderLifecycle(event: string, fields: Record<string, unknown>): v
   console.info("megabrain-provider", JSON.stringify({ event, ...fields }));
 }
 
+/** Pure serializer: tests inspect the exact wire keys without reaching a network. */
+export function buildOpenRouterRequestBody(req: CompletionRequest): Record<string, unknown> {
+  return {
+    model: req.modelSlug,
+    provider: {
+      allow_fallbacks: false,
+      require_parameters: true,
+      ...(req.maxPrice
+        ? { max_price: { prompt: req.maxPrice.promptPerMTok, completion: req.maxPrice.completionPerMTok } }
+        : {}),
+    },
+    messages: [
+      { role: "system", content: req.system },
+      { role: "user", content: req.user },
+    ],
+    max_tokens: req.maxOutputTokens,
+    temperature: req.temperature ?? 0.7,
+    ...(req.reasoning
+      ? {
+          reasoning: {
+            ...(req.reasoning.enabled !== undefined ? { enabled: req.reasoning.enabled } : {}),
+            ...(req.reasoning.effort !== undefined ? { effort: req.reasoning.effort } : {}),
+            ...(req.reasoning.maxTokens !== undefined ? { max_tokens: req.reasoning.maxTokens } : {}),
+            ...(req.reasoning.exclude !== undefined ? { exclude: req.reasoning.exclude } : {}),
+          },
+        }
+      : {}),
+    ...(req.jsonSchema
+      ? {
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: req.jsonSchema.name, strict: true, schema: req.jsonSchema.schema },
+          },
+        }
+      : {}),
+    usage: { include: true },
+  };
+}
+
 /**
  * Live OpenRouter transport. Constructed explicitly by the benchmark CLI and by
  * nothing else — there is no ambient default, so a module cannot accidentally
@@ -295,6 +334,19 @@ export function createOpenRouterTransport(apiKey: string): Transport {
         partial_usage_available: false,
         streaming: false,
       });
+      const wireBody = buildOpenRouterRequestBody(req);
+      const wireReasoning = wireBody.reasoning as Record<string, unknown> | undefined;
+      logProviderLifecycle("wire_config", {
+        stage,
+        requested_model: req.modelSlug,
+        max_tokens: wireBody.max_tokens,
+        reasoning_enabled: wireReasoning?.enabled ?? null,
+        reasoning_effort: wireReasoning?.effort ?? null,
+        reasoning_max_tokens: wireReasoning?.max_tokens ?? null,
+        reasoning_exclude: wireReasoning?.exclude ?? null,
+        timeout_limit_ms: timeoutLimitMs,
+        structured_output: Boolean(wireBody.response_format),
+      });
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -305,72 +357,7 @@ export function createOpenRouterTransport(apiKey: string): Transport {
           "X-OpenRouter-Metadata": "enabled",
         },
         signal: controller.signal,
-        body: JSON.stringify({
-          model: req.modelSlug,
-          /**
-           * No substitutions, at any level.
-           *
-           * `allow_fallbacks: false` stops OpenRouter routing to a different
-           * upstream provider for this model, and omitting a `models` array
-           * stops model-level fallback. Detecting a swap after the fact — which
-           * is all the accounting check can do — is strictly worse than making
-           * it impossible: by then the charge at the other model's price has
-           * already happened.
-           *
-           * `require_parameters` refuses a provider that would silently drop
-           * response_format, which would turn a structured stage into free text
-           * we then pay for and reject.
-           *
-           * `max_price` is the only ceiling the provider itself enforces. Set to
-           * the exact catalogue price, so a regional or provider markup is
-           * refused rather than billed.
-           */
-          provider: {
-            allow_fallbacks: false,
-            require_parameters: true,
-            ...(req.maxPrice
-              ? {
-                  max_price: {
-                    prompt: req.maxPrice.promptPerMTok,
-                    completion: req.maxPrice.completionPerMTok,
-                  },
-                }
-              : {}),
-          },
-          messages: [
-            { role: "system", content: req.system },
-            { role: "user", content: req.user },
-          ],
-          max_tokens: req.maxOutputTokens,
-          temperature: req.temperature ?? 0.7,
-          // Built field-by-field rather than passed through verbatim: the TS
-          // type uses maxTokens/timeoutMs (repo convention), but OpenRouter's
-          // actual API field is reasoning.max_tokens, and timeoutMs is ours
-          // alone (consumed by timeoutForReasoning, never sent). A verbatim
-          // passthrough would have serialized "maxTokens" — a key the provider
-          // does not recognize and silently ignores — which is exactly what
-          // happened here until now: no preset had ever set it, so the bug was
-          // latent rather than causing a visible failure.
-          ...(req.reasoning
-            ? {
-                reasoning: {
-                  ...(req.reasoning.enabled !== undefined ? { enabled: req.reasoning.enabled } : {}),
-                  ...(req.reasoning.effort !== undefined ? { effort: req.reasoning.effort } : {}),
-                  ...(req.reasoning.maxTokens !== undefined ? { max_tokens: req.reasoning.maxTokens } : {}),
-                  ...(req.reasoning.exclude !== undefined ? { exclude: req.reasoning.exclude } : {}),
-                },
-              }
-            : {}),
-          ...(req.jsonSchema
-            ? {
-                response_format: {
-                  type: "json_schema",
-                  json_schema: { name: req.jsonSchema.name, strict: true, schema: req.jsonSchema.schema },
-                },
-              }
-            : {}),
-          usage: { include: true },
-        }),
+        body: JSON.stringify(wireBody),
       });
       responseHeadersReceived = true;
       logProviderLifecycle("response_headers", {
@@ -402,6 +389,14 @@ export function createOpenRouterTransport(apiKey: string): Transport {
       }
 
       const data = (await res.json()) as Record<string, unknown>;
+      logProviderLifecycle("response_body", {
+        stage,
+        requested_model: req.modelSlug,
+        elapsed_ms: Date.now() - started,
+        response_body_received: true,
+        partial_usage_available: "usage" in data,
+        streaming: false,
+      });
       const choices = data.choices as { message?: { content?: unknown } }[] | undefined;
       const content = choices?.[0]?.message?.content;
       if (typeof content !== "string") throw new Error("Provider returned no message content.");

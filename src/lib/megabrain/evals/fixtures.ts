@@ -446,7 +446,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       const stage =
         req.jsonSchema?.name === "case_extraction" ? "extract"
         : req.jsonSchema?.name === "case_analysis" ? "analyse"
-        : req.jsonSchema?.name === "case_plan" ? "strategise"
+        : req.jsonSchema?.name === "case_plan" || req.jsonSchema?.name === "compact_case_analysis_and_plan" ? "strategise"
         : undefined;
       const fixed = stage ? opts.stageCosts?.[stage] : undefined;
       if (fixed !== undefined) {
@@ -473,7 +473,7 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
       return (
         (opts.truncateStage === "extract" && n === "case_extraction") ||
         (opts.truncateStage === "analyse" && n === "case_analysis") ||
-        (opts.truncateStage === "strategise" && n === "case_plan")
+        (opts.truncateStage === "strategise" && (n === "case_plan" || n === "compact_case_analysis_and_plan"))
       );
     }
     // Returns CompletionResult explicitly: inferring the generic from the
@@ -628,6 +628,36 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
           plan: GOOD_ANALYSIS.plan,
         }),
         usage: usage(2500, 1600, 0.005), latencyMs: 5200,
+      }));
+    }
+    if (name === "compact_case_analysis_and_plan") {
+      return withModel(tamper({
+        content: JSON.stringify({
+          hypotheses: {
+            hypotheses: A.hypotheses.hypotheses.slice(0, 3).map(({ claim, confidence, discriminatingTest }) => ({ claim, confidence, discriminatingTest })),
+          },
+          leverage: {
+            points: A.leverage.points.filter((p) => p.status === "present").slice(0, 4).map(({ kind, description, risk, reversibility }) => ({ kind, description, risk, reversibility })),
+          },
+          strategies: {
+            strategies: A.strategies.strategies.slice(0, 3).map(({ kind, summary, risk, reversible }) => ({ kind, summary, risk, reversible })),
+          },
+          countermoves: {
+            countermoves: A.countermoves.countermoves.slice(0, 3).map(({ againstStrategy, likelyResponse }) => ({ againstStrategy, likelyResponse })),
+          },
+          plan: {
+            conclusion: A.plan.conclusion,
+            recommendedMove: A.plan.recommendedMove,
+            exactWords: A.plan.exactWords.map(({ role, text, useWhen, doNotUseWhen }) => ({ role, text, useWhen, doNotUseWhen })),
+            ifThenBranches: A.plan.ifThenBranches.map(({ if: condition, then, stopCondition }) => ({ if: condition, then, stopCondition })),
+            stopSignals: A.plan.stopSignals,
+            fallbackPlan: A.plan.fallbackPlan,
+            risk: A.plan.risk,
+            riskAssessment: A.plan.riskAssessment,
+            uncertainty: A.plan.uncertainty,
+          },
+        }),
+        usage: usage(2500, 1200, 0.009), latencyMs: 5200,
       }));
     }
 

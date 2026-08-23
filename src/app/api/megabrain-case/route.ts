@@ -65,12 +65,12 @@ interface Body {
 function safeCode(e: unknown): string {
   const name = e instanceof Error ? e.name : "";
   if (name === "AbortError" || name === "ProviderTimeoutError") return "PROVIDER_TIMEOUT";
-  if (name === "CaseTooComplexError") return "CASE_TOO_COMPLEX";
-  if (name === "BudgetExceededError") return "BUDGET_EXCEEDED";
+  if (name === "CaseTooComplexError") return "INPUT_TOO_LARGE";
+  if (name === "BudgetExceededError" || name === "AccountingError") return "COST_LIMIT";
   if (name === "ProviderHttpError") return "PROVIDER_UNAVAILABLE";
-  if (name === "OutputTruncatedError") return "OUTPUT_TRUNCATED";
-  if (name === "StageRejectedError") return "INVALID_MODEL_OUTPUT";
-  if (name === "AccountingError") return "ACCOUNTING_ERROR";
+  if (name === "OutputTruncatedError") return "OUTPUT_LIMIT";
+  if (name === "StageParseError") return "PARSE_ERROR";
+  if (name === "StageRejectedError") return "SCHEMA_ERROR";
   return "CASE_FAILED";
 }
 
@@ -421,6 +421,10 @@ export async function POST(req: NextRequest) {
       capUsd: flow?.capUsd ?? 0,
     });
     console.error("megabrain-case failure", JSON.stringify({
+      caseId: flow?.id ?? null,
+      requestId: requestId || null,
+      action: action ?? null,
+      phase: flow?.phase ?? null,
       code: e instanceof FlowError ? e.code : safeCode(e),
       errorClass: e instanceof Error ? e.name : "UnknownError",
       preset: flow?.manual?.preset ?? null,
@@ -441,8 +445,12 @@ export async function POST(req: NextRequest) {
       }
       if (operationLedger) captureManualTelemetry(flow, operationLedger);
       const code = e instanceof FlowError ? e.code : safeCode(e);
-      // Validation and stale-transition errors do not mutate a healthy flow.
-      if (!(e instanceof FlowError && e.status < 500)) failFlow(flow, requestId, code);
+      // Once this request owns an analysing transition, every refusal must
+      // release it. Previously a 4xx external-budget refusal left the durable
+      // row stuck in analysing with an active request forever.
+      if (flow.activeRequestId === requestId || !(e instanceof FlowError && e.status < 500)) {
+        failFlow(flow, requestId, code);
+      }
       await persistBestEffort(repo, flow);
     }
     if (e instanceof FlowError) return NextResponse.json({ error: e.code, ...(flow ? { flow: publicFlow(flow) } : {}) }, { status: e.status });

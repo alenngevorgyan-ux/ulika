@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { BudgetExceededError, CostLedger, MODE_CAPS, RESERVATION_SAFETY_MARGIN, type CaseMode } from "./costLedger";
 import { assertCeilingSupported, costOf, DEFAULT_CONFIGURATION, estimateTokens, modelFor, resolveConfiguration, type Configuration } from "./modelRouter";
-import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
-import { analysePrompt, baselinePrompt, combinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
+import { EXTRACT_SCHEMA, ANALYSE_SCHEMA, STRATEGISE_SCHEMA, COMBINED_SCHEMA, COMPACT_COMBINED_SCHEMA, LIGHT_SCHEMA } from "./jsonSchemas";
+import { analysePrompt, baselinePrompt, combinedPrompt, compactCombinedPrompt, criticPrompt, extractPrompt, fence, lightPrompt, strategisePrompt } from "./prompts";
 import {
   isTruncatedFinish,
   OutputTruncatedError,
@@ -28,6 +28,7 @@ import {
   validatePlan,
   validateStrategies,
   validateLightPlan,
+  LEVERAGE_KINDS,
   type CaseAnalysis,
   type LightPlan,
   type Jurisdiction,
@@ -107,6 +108,10 @@ export interface CaseInput {
      * so their behavior is unchanged.
      */
     maxOutputTokens?: Partial<Record<"clarify" | "extract" | "analyse" | "strategise" | "critic" | "final", number>>;
+    /** Use the compact strategy artifact consumed by buildBrief(). */
+    compactStrategy?: boolean;
+    /** Accounting-only allowance; never serialized as a provider parameter. */
+    reasoningReservationTokens?: Partial<Record<"strategise" | "final", number>>;
   };
   /** Compact, retrieved data. It is never promoted to instructions. */
   knowledgeBlock?: string;
@@ -198,6 +203,17 @@ export class StageRejectedError extends Error {
   }
 }
 
+export class StageParseError extends Error {
+  constructor(readonly stage: string) {
+    super(`Stage "${stage}" returned an unparseable structured response.`);
+    this.name = "StageParseError";
+  }
+}
+
+function pipelineEvent(event: string, fields: Record<string, unknown>): void {
+  console.info("megabrain-pipeline", JSON.stringify({ event, ...fields }));
+}
+
 /**
  * Emit the schema-validation outcome for a stage.
  *
@@ -208,13 +224,60 @@ export class StageRejectedError extends Error {
 function reportValidation(
   ledger: CostLedger,
   stage: string,
-  results: { ok: boolean }[]
+  results: { ok: boolean; problems?: string[] }[]
 ): void {
+  pipelineEvent("schema_validation", {
+    stage,
+    schema_success: results.every((r) => r.ok),
+    problem_count: results.reduce((total, r) => total + (r.problems?.length ?? (r.ok ? 0 : 1)), 0),
+  });
   ledger.onValidation?.({
     attemptId: "",
     stage,
     result: results.every((r) => r.ok) ? "ok" : "invalid",
   });
+}
+
+/** Expand only validator scaffolding that buildBrief() never consumes. */
+function expandCompactCombined(raw: Record<string, unknown>): Record<string, unknown> {
+  const hypotheses = ((raw.hypotheses as { hypotheses?: unknown[] } | undefined)?.hypotheses ?? []).map((h) => ({
+    ...(h as Record<string, unknown>), evidenceFor: [], evidenceAgainst: [],
+  }));
+  const selectedLeverage = ((raw.leverage as { points?: unknown[] } | undefined)?.points ?? []) as Record<string, unknown>[];
+  const leverageByKind = new Map(selectedLeverage.map((p) => [p.kind, p]));
+  const leverage = LEVERAGE_KINDS.map((kind) => leverageByKind.get(kind) ?? {
+    kind, status: "unknown", description: "Not selected for the compact brief.",
+    basis: "not emitted", risk: "", reversibility: "not_applicable",
+  }).map((p) => ({
+    ...p,
+    status: leverageByKind.has(p.kind) ? "present" : p.status,
+    basis: leverageByKind.has(p.kind) ? "selected by strategist" : p.basis,
+  }));
+  const strategies = ((raw.strategies as { strategies?: unknown[] } | undefined)?.strategies ?? []).map((s) => {
+    const item = s as Record<string, unknown>;
+    return { ...item, firstMove: item.summary, costIfItFails: "", redirect: null };
+  });
+  const countermoves = ((raw.countermoves as { countermoves?: unknown[] } | undefined)?.countermoves ?? []).map((c) => {
+    const item = c as Record<string, unknown>;
+    return {
+      ...item, denial: "", retaliation: "", evidenceDestruction: "", escalation: "",
+      worstPlausibleOutcome: item.likelyResponse,
+    };
+  });
+  const plan = (raw.plan ?? {}) as Record<string, unknown>;
+  const exactWords = Array.isArray(plan.exactWords)
+    ? plan.exactWords.map((p) => ({ ...(p as Record<string, unknown>), purpose: (p as Record<string, unknown>).role }))
+    : [];
+  const ifThenBranches = Array.isArray(plan.ifThenBranches)
+    ? plan.ifThenBranches.map((b) => ({ ...(b as Record<string, unknown>), rationale: "" }))
+    : [];
+  return {
+    hypotheses: { hypotheses },
+    leverage: { points: leverage },
+    strategies: { strategies },
+    countermoves: { countermoves },
+    plan: { ...plan, exactWords, ifThenBranches, missingInformation: [], whatNotToSay: [] },
+  };
 }
 
 /** Stop the case when any validator refused. Reporting is not accepting. */
@@ -252,12 +315,17 @@ export function projectCasePipeline(p: {
   strategiseReasoning?: ReasoningConfig;
   /** Same visible-output override the strategise call will actually run under. */
   strategiseVisibleCeiling?: number;
+  strategiseReasoningReservationTokens?: number;
 }): { perStage: { stage: string; inputTokens: number; maxOutputTokens: number; usd: number }[]; totalUsd: number } {
   const t = estimateTokens;
   const reserved = (spec: ReturnType<typeof modelFor>, inputTokens: number, maxOut: number) =>
     costOf(spec, inputTokens, maxOut) * RESERVATION_SAFETY_MARGIN;
   const strategiseVisible = p.strategiseVisibleCeiling ?? MAX_OUTPUT_TOKENS.strategise;
-  const strategiseCeiling = reservationCeiling(strategiseVisible, p.strategiseReasoning);
+  const strategiseCeiling = reservationCeiling(
+    strategiseVisible,
+    p.strategiseReasoning,
+    p.strategiseReasoningReservationTokens
+  );
 
   const extractIn = t(p.systems.extract + p.account);
   // The frame and actor map arrive as JSON on the next prompt; their worst case
@@ -334,7 +402,9 @@ export function projectAdvicePipeline(input: {
         analyse: analysePrompt(sentinel, language, jurisdiction),
         strategise:
           config.pipeline === "two-stage"
-            ? combinedPrompt(sentinel, language, jurisdiction)
+            ? input.execution?.compactStrategy
+              ? compactCombinedPrompt(sentinel, language, jurisdiction)
+              : combinedPrompt(sentinel, language, jurisdiction)
             : strategisePrompt(sentinel, language, jurisdiction),
       },
       specs: {
@@ -345,6 +415,7 @@ export function projectAdvicePipeline(input: {
       pipeline: config.pipeline === "two-stage" ? "two-stage" : "three-stage",
       strategiseReasoning: input.execution?.reasoning?.strategise,
       strategiseVisibleCeiling: input.execution?.maxOutputTokens?.strategise,
+      strategiseReasoningReservationTokens: input.execution?.reasoningReservationTokens?.strategise,
     }).totalUsd;
 
     if (input.mode === "strong") {
@@ -370,7 +441,11 @@ export function projectAdvicePipeline(input: {
   total += reserve(
     modelFor(finalConfig, "strategise"),
     finalText,
-    reservationCeiling(input.execution?.maxOutputTokens?.final ?? MAX_OUTPUT_TOKENS.final, input.execution?.reasoning?.final)
+    reservationCeiling(
+      input.execution?.maxOutputTokens?.final ?? MAX_OUTPUT_TOKENS.final,
+      input.execution?.reasoning?.final,
+      input.execution?.reasoningReservationTokens?.final
+    )
   );
   return total;
 }
@@ -400,8 +475,12 @@ const MAX_JSON_RETRIES = 1;
  * just what the visible-output ceiling promises — whether or not the
  * provider actually honors that reasoning budget as a hard limit.
  */
-export function reservationCeiling(maxOutputTokens: number, reasoning?: ReasoningConfig): number {
-  return maxOutputTokens + (reasoning?.maxTokens ?? 0);
+export function reservationCeiling(
+  maxOutputTokens: number,
+  reasoning?: ReasoningConfig,
+  accountingReasoningTokens = 0
+): number {
+  return maxOutputTokens + Math.max(reasoning?.maxTokens ?? 0, accountingReasoningTokens);
 }
 
 async function stage(
@@ -414,10 +493,11 @@ async function stage(
   jsonSchema: { name: string; schema: Record<string, unknown> },
   reasoning?: ReasoningConfig,
   maxJsonRetries = MAX_JSON_RETRIES,
-  visibleCeilingOverride?: number
+  visibleCeilingOverride?: number,
+  accountingReasoningTokens = 0
 ): Promise<unknown> {
   const maxOutputTokens = visibleCeilingOverride ?? MAX_OUTPUT_TOKENS[name];
-  const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning);
+  const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning, accountingReasoningTokens);
   /**
    * Checked before the reservation, so an unsendable ceiling costs nothing.
    *
@@ -506,10 +586,17 @@ async function stage(
     }
 
     const parsed = parseJsonReply(result.content);
+    pipelineEvent("structured_response", {
+      stage: name,
+      response_body_received: true,
+      response_chars: result.content.length,
+      response_token_estimate: estimateTokens(result.content),
+      parse_success: parsed !== null,
+    });
     ledger.onValidation?.({ attemptId, stage: name, result: parsed !== null ? "ok" : "unparseable" });
     if (parsed !== null) return parsed;
   }
-  throw new Error(`Stage "${name}" returned no parseable JSON after ${maxJsonRetries + 1} attempts.`);
+  throw new StageParseError(name);
 }
 
 /**
@@ -528,10 +615,11 @@ async function textStage(
   system: string,
   user: string,
   reasoning?: ReasoningConfig,
-  visibleCeilingOverride?: number
+  visibleCeilingOverride?: number,
+  accountingReasoningTokens = 0
 ): Promise<string> {
   const maxOutputTokens = visibleCeilingOverride ?? MAX_OUTPUT_TOKENS[name];
-  const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning);
+  const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning, accountingReasoningTokens);
   assertCeilingSupported(spec, reservedCeiling);
   const attemptId = randomBytes(6).toString("hex");
   const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, reservedCeiling, {
@@ -679,7 +767,10 @@ export async function runCase(
     systems: {
       extract: extractPrompt(sentinel, language, jurisdiction),
       analyse: analysePrompt(sentinel, language, jurisdiction),
-      strategise: strategisePrompt(sentinel, language, jurisdiction),
+      strategise:
+        configuration.pipeline === "two-stage" && input.execution?.compactStrategy
+          ? compactCombinedPrompt(sentinel, language, jurisdiction)
+          : strategisePrompt(sentinel, language, jurisdiction),
     },
     specs: {
       extract: extractSpec,
@@ -689,6 +780,7 @@ export async function runCase(
     pipeline: configuration.pipeline === "two-stage" ? "two-stage" : "three-stage",
     strategiseReasoning: input.execution?.reasoning?.strategise,
     strategiseVisibleCeiling: input.execution?.maxOutputTokens?.strategise,
+    strategiseReasoningReservationTokens: input.execution?.reasoningReservationTokens?.strategise,
   });
   const preflightCap = input.preflightCapUsd ?? MODE_CAPS[mode];
   if (projection.totalUsd > preflightCap) {
@@ -738,18 +830,23 @@ export async function runCase(
   // earns its cost. Not run live in V0.
   if (configuration.pipeline === "two-stage") {
     const spec = modelFor(configuration, "strategise");
-    const raw = (await stage(
+    const compact = input.execution?.compactStrategy === true;
+    const wireRaw = (await stage(
       transport,
       ledger,
       "strategise",
       spec,
-      combinedPrompt(sentinel, language, jurisdiction),
+      compact
+        ? compactCombinedPrompt(sentinel, language, jurisdiction)
+        : combinedPrompt(sentinel, language, jurisdiction),
       JSON.stringify({ frame: frame.value, actors: actors.value, knowledgeCards: input.knowledgeBlock || undefined }),
-      COMBINED_SCHEMA as unknown as { name: string; schema: Record<string, unknown> },
+      (compact ? COMPACT_COMBINED_SCHEMA : COMBINED_SCHEMA) as unknown as { name: string; schema: Record<string, unknown> },
       input.execution?.reasoning?.strategise,
       input.execution?.maxJsonRetries,
-      input.execution?.maxOutputTokens?.strategise
+      input.execution?.maxOutputTokens?.strategise,
+      input.execution?.reasoningReservationTokens?.strategise
     )) as Record<string, unknown>;
+    const raw = compact ? expandCompactCombined(wireRaw) : wireRaw;
 
     const h = validateHypotheses(raw.hypotheses);
     const l = validateLeverage(raw.leverage);
@@ -757,6 +854,7 @@ export async function runCase(
     const cm = validateCountermoves(raw.countermoves);
     const pl = validatePlan(raw.plan);
     problems.push(...h.problems, ...l.problems, ...st.problems, ...cm.problems, ...pl.problems);
+    reportValidation(ledger, "strategise", [h, l, st, cm, pl]);
     requireOk("strategise", [h, l, st, cm, pl]);
     return {
       analysis: {
@@ -1182,6 +1280,10 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
     );
     analysis = engine.analysis;
     brief = buildBrief(engine.analysis);
+    pipelineEvent("brief_ready", {
+      brief_chars: renderBrief(brief).length,
+      brief_token_estimate: estimateTokens(renderBrief(brief)),
+    });
     problems = engine.problems;
     warnings = engine.warnings;
   }
@@ -1192,6 +1294,12 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
     ? { ...defaultFinal, id: "manual-final", roles: { ...defaultFinal.roles, strategise: input.execution.finalModelKey } }
     : defaultFinal;
   const finalSpec = modelFor(finalConfig, "strategise");
+  pipelineEvent("final_handoff_ready", {
+    final_handoff_ready: true,
+    requested_model: finalSpec.slug,
+    brief_chars: brief ? renderBrief(brief).length : 0,
+    brief_token_estimate: brief ? estimateTokens(renderBrief(brief)) : 0,
+  });
   const answer = await textStage(
     transport,
     ledger,
@@ -1200,7 +1308,8 @@ export async function runAdvice(input: AdviceInput, transport: Transport): Promi
     finalPrompt(sentinel, language, jurisdiction, brief !== null),
     finalUserMessage(input.account, answersBlock, brief ? renderBrief(brief) : null, sentinel),
     input.execution?.reasoning?.final,
-    input.execution?.maxOutputTokens?.final
+    input.execution?.maxOutputTokens?.final,
+    input.execution?.reasoningReservationTokens?.final
   );
 
   const narrative = checkNarrative(answer);

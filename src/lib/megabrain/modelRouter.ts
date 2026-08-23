@@ -117,8 +117,9 @@ export const MODELS: Record<string, ModelSpec> = {
   "glm-5.2": {
     slug: "z-ai/glm-5.2",
     provider: "openrouter",
-    inputPerMTok: 0.336,
-    outputPerMTok: 1.056,
+    // OpenRouter /models metadata, verified 2026-08-24.
+    inputPerMTok: 0.966,
+    outputPerMTok: 3.036,
     contextTokens: 1_024_000,
     structuredOutputs: true,
     maxCompletionTokens: 128_000,
