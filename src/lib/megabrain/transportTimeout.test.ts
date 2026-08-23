@@ -24,6 +24,37 @@ describe("provider timeout policy", () => {
     expect(REASONING_STAGE_TIMEOUT_MS).toBeLessThan(150_000);
   });
 
+  it("lets a stage override the reasoning timeout, without changing the shared default", () => {
+    // D Premium's strategise timed out once at the old flat 120s. A per-stage
+    // override exists so that ceiling can be raised for the stage that needs
+    // it without touching every other reasoning-enabled preset (A/B/C/E),
+    // which never set reasoning.timeoutMs and must still get the shared default.
+    expect(timeoutForReasoning({ enabled: true, timeoutMs: 170_000 })).toBe(170_000);
+    expect(timeoutForReasoning({ enabled: true, exclude: true, maxTokens: 6_000, timeoutMs: 170_000 })).toBe(170_000);
+    // Unset timeoutMs still falls back to the shared default — every existing
+    // preset's behavior is unchanged by this feature existing.
+    expect(timeoutForReasoning({ enabled: true, exclude: true })).toBe(REASONING_STAGE_TIMEOUT_MS);
+  });
+
+  it("D's two reasoning stages fit inside the route's 300s ceiling with real margin", async () => {
+    // Vercel's route maxDuration is 300s (api/megabrain-case/route.ts). D runs
+    // extract (Gemini, fast) then strategise then final, both Qwen reasoning
+    // calls, sequentially in one request. If the two reasoning ceilings alone
+    // could reach 300s there would be no room for anything else and a genuine
+    // slow case would be killed by the platform instead of failing cleanly
+    // with our own ProviderTimeoutError.
+    const { MANUAL_PRESETS } = await import("./manualPresets");
+    const d = MANUAL_PRESETS.D.execution.reasoning!;
+    const ROUTE_MAX_DURATION_MS = 300_000;
+    const strategiseTimeout = timeoutForReasoning(d.strategise) ?? REASONING_STAGE_TIMEOUT_MS;
+    const finalTimeout = timeoutForReasoning(d.final) ?? REASONING_STAGE_TIMEOUT_MS;
+    const nonReasoningOverheadMs = ROUTE_MAX_DURATION_MS - strategiseTimeout - finalTimeout;
+    expect(nonReasoningOverheadMs).toBeGreaterThanOrEqual(30_000);
+    // Both raised from the flat 120s that timed out once on strategise, and
+    // neither left at the shared default without a deliberate reason.
+    expect(strategiseTimeout).toBeGreaterThan(REASONING_STAGE_TIMEOUT_MS);
+  });
+
   it("attributes an abort to our transport timer without logging private text", async () => {
     vi.useFakeTimers();
     const log = vi.spyOn(console, "info").mockImplementation(() => undefined);

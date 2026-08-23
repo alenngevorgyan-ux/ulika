@@ -72,13 +72,30 @@ export const MANUAL_PRESETS: Record<ManualPresetId, ManualPreset> = {
       finalModelKey: "qwen-3.6-max-preview",
       maxJsonRetries: 0,
       reasoning: {
-        strategise: { enabled: true, exclude: true },
-        final: { enabled: true, exclude: true },
+        // maxTokens/timeoutMs are evidence-based, not guessed: a live D run
+        // produced 3233 reasoning tokens on strategise and (separately) timed
+        // out once at the old 120s ceiling. strategise's budget carries ~1.85x
+        // margin over that one sample; final has no live sample yet (both live
+        // attempts failed before reaching it) so its numbers are a documented
+        // estimate, proportioned to its smaller visible-output ceiling (2200
+        // vs strategise's 3000), pending real data from the next run.
+        strategise: { enabled: true, exclude: true, maxTokens: 6_000, timeoutMs: 170_000 },
+        final: { enabled: true, exclude: true, maxTokens: 4_000, timeoutMs: 90_000 },
       },
     },
-    capUsd: 0.12,
+    // Raised from 0.12: that cap was set before any live reasoning-token data
+    // existed. It was never actually the failure mode (total actual spend
+    // across a full attempt was ~$0.047), but the PER-STAGE reservation was:
+    // 3000 visible-only tokens reserved against a real 6237-token bill. With
+    // the reasoning budgets above folded into reservationCeiling(), a full
+    // two-call D pipeline now reserves roughly $0.14 in the worst case
+    // (strategise ~$0.08 + final ~$0.06); 0.20 leaves real margin without
+    // pretending reasoning is unbounded (an unbounded run against this
+    // model's true 65,536-token completion ceiling would be ~$0.4-0.5 — this
+    // cap still means something).
+    capUsd: 0.2,
     reasoningReserveMultiplier: 2.5,
-    limitation: "The endpoint can bill reasoning beyond max_tokens; the external per-key limit remains the final hard stop.",
+    limitation: "The endpoint bills reasoning as completion tokens beyond max_tokens; reasoning.max_tokens is now sent as an explicit budget, but whether this Alibaba endpoint honors it as a hard limit is unverified — reservations assume it might not. The external per-key limit remains the final hard stop.",
   },
   E: {
     id: "E",

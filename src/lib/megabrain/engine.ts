@@ -238,10 +238,13 @@ export function projectCasePipeline(p: {
   };
   /** Project the pipeline that will actually run, not the one usually shipped. */
   pipeline?: "three-stage" | "two-stage";
+  /** Same reasoning config the strategise call will actually run under, so this projection and stage()'s own reserve() cannot disagree. */
+  strategiseReasoning?: ReasoningConfig;
 }): { perStage: { stage: string; inputTokens: number; maxOutputTokens: number; usd: number }[]; totalUsd: number } {
   const t = estimateTokens;
   const reserved = (spec: ReturnType<typeof modelFor>, inputTokens: number, maxOut: number) =>
     costOf(spec, inputTokens, maxOut) * RESERVATION_SAFETY_MARGIN;
+  const strategiseCeiling = reservationCeiling(MAX_OUTPUT_TOKENS.strategise, p.strategiseReasoning);
 
   const extractIn = t(p.systems.extract + p.account);
   // The frame and actor map arrive as JSON on the next prompt; their worst case
@@ -265,14 +268,14 @@ export function projectCasePipeline(p: {
           {
             stage: "strategise",
             inputTokens: t(p.systems.strategise) + MAX_OUTPUT_TOKENS.extract,
-            maxOutputTokens: MAX_OUTPUT_TOKENS.strategise,
-            usd: reserved(p.specs.strategise, t(p.systems.strategise) + MAX_OUTPUT_TOKENS.extract, MAX_OUTPUT_TOKENS.strategise),
+            maxOutputTokens: strategiseCeiling,
+            usd: reserved(p.specs.strategise, t(p.systems.strategise) + MAX_OUTPUT_TOKENS.extract, strategiseCeiling),
           },
         ]
       : [
           extract,
           { stage: "analyse", inputTokens: analyseIn, maxOutputTokens: MAX_OUTPUT_TOKENS.analyse, usd: reserved(p.specs.analyse, analyseIn, MAX_OUTPUT_TOKENS.analyse) },
-          { stage: "strategise", inputTokens: strategiseIn, maxOutputTokens: MAX_OUTPUT_TOKENS.strategise, usd: reserved(p.specs.strategise, strategiseIn, MAX_OUTPUT_TOKENS.strategise) },
+          { stage: "strategise", inputTokens: strategiseIn, maxOutputTokens: strategiseCeiling, usd: reserved(p.specs.strategise, strategiseIn, strategiseCeiling) },
         ];
   return { perStage, totalUsd: perStage.reduce((n, x) => n + x.usd, 0) };
 }
@@ -327,6 +330,7 @@ export function projectAdvicePipeline(input: {
         strategise: modelFor(config, "strategise"),
       },
       pipeline: config.pipeline === "two-stage" ? "two-stage" : "three-stage",
+      strategiseReasoning: input.execution?.reasoning?.strategise,
     }).totalUsd;
 
     if (input.mode === "strong") {
@@ -349,7 +353,11 @@ export function projectAdvicePipeline(input: {
   const finalConfig = finalKey
     ? { ...defaultConfig, id: "manual-final", roles: { ...defaultConfig.roles, strategise: finalKey } }
     : defaultConfig;
-  total += reserve(modelFor(finalConfig, "strategise"), finalText, MAX_OUTPUT_TOKENS.final);
+  total += reserve(
+    modelFor(finalConfig, "strategise"),
+    finalText,
+    reservationCeiling(MAX_OUTPUT_TOKENS.final, input.execution?.reasoning?.final)
+  );
   return total;
 }
 
@@ -364,6 +372,24 @@ function modeThatWouldFit(projectedUsd: number, current: string): string | null 
 /** One retry, and only for unparseable JSON. Never for a refusal or a timeout. */
 const MAX_JSON_RETRIES = 1;
 
+/**
+ * What a stage's completion can actually cost, for reservation purposes.
+ *
+ * `maxOutputTokens` is what we ask the provider to cap the VISIBLE output at,
+ * and is sent to the provider unchanged — this function does not touch it.
+ * But reasoning tokens are billed as completion tokens too, and live evidence
+ * (qwen/qwen3.6-max-preview, D Premium) showed max_tokens=3000 bounding the
+ * visible output as expected while reasoning ran unbounded on top: 3233
+ * reasoning tokens + ~3004 visible = 6237 total billed, against a reservation
+ * that only knew about 3000. A stage's `reasoning.maxTokens`, when set, is
+ * added here so the reservation reflects what could actually be billed, not
+ * just what the visible-output ceiling promises — whether or not the
+ * provider actually honors that reasoning budget as a hard limit.
+ */
+export function reservationCeiling(maxOutputTokens: number, reasoning?: ReasoningConfig): number {
+  return maxOutputTokens + (reasoning?.maxTokens ?? 0);
+}
+
 async function stage(
   transport: Transport,
   ledger: CostLedger,
@@ -376,14 +402,19 @@ async function stage(
   maxJsonRetries = MAX_JSON_RETRIES
 ): Promise<unknown> {
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
+  const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning);
   /**
    * Checked before the reservation, so an unsendable ceiling costs nothing.
    *
    * Fail-closed by design: a model with no recorded capability is refused
    * rather than tried. The alternative is what already happened once — a
    * ceiling nobody had checked, a paid call, and a 400 that named nothing.
+   *
+   * Checked against the RESERVATION ceiling (visible + reasoning budget), not
+   * just the visible one — a stage whose reasoning budget alone would exceed
+   * what the model can produce must be refused here, not discovered live.
    */
-  assertCeilingSupported(spec, maxOutputTokens);
+  assertCeilingSupported(spec, reservedCeiling);
 
   for (let attempt = 0; attempt <= maxJsonRetries; attempt++) {
     // Local id, minted before the request. Ties an attempt line to its outcome
@@ -391,7 +422,9 @@ async function stage(
     const attemptId = randomBytes(6).toString("hex");
     // Reservation happens per attempt: a retry costs real money and must be
     // charged against the same cap, or the guard is trivially defeated by one.
-    const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
+    // Reserved against reservedCeiling (may exceed maxOutputTokens when this
+    // stage reasons) — the request below still asks for maxOutputTokens only.
+    const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, reservedCeiling, {
       attemptId,
       retryNumber: attempt,
     });
@@ -482,9 +515,10 @@ async function textStage(
   reasoning?: ReasoningConfig
 ): Promise<string> {
   const maxOutputTokens = MAX_OUTPUT_TOKENS[name];
-  assertCeilingSupported(spec, maxOutputTokens);
+  const reservedCeiling = reservationCeiling(maxOutputTokens, reasoning);
+  assertCeilingSupported(spec, reservedCeiling);
   const attemptId = randomBytes(6).toString("hex");
-  const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, maxOutputTokens, {
+  const { inputTokens, projectedUsd } = ledger.reserve(name, spec, system + user, reservedCeiling, {
     attemptId,
     retryNumber: 0,
   });
@@ -637,6 +671,7 @@ export async function runCase(
       strategise: modelFor(configuration, "strategise"),
     },
     pipeline: configuration.pipeline === "two-stage" ? "two-stage" : "three-stage",
+    strategiseReasoning: input.execution?.reasoning?.strategise,
   });
   const preflightCap = input.preflightCapUsd ?? MODE_CAPS[mode];
   if (projection.totalUsd > preflightCap) {

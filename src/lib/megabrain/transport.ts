@@ -17,8 +17,22 @@ import { readUsage, type ProviderUsage } from "./costLedger";
 export interface ReasoningConfig {
   enabled?: boolean;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * OpenRouter's `reasoning.max_tokens` — an explicit reasoning budget, distinct
+   * from `maxOutputTokens`/`max_tokens` at the top level. Live evidence on
+   * qwen/qwen3.6-max-preview: a request with max_tokens=3000 and no reasoning
+   * budget came back with 3233 reasoning tokens PLUS ~3000 visible tokens
+   * (6237 total billed) — max_tokens bounded the visible output, not reasoning.
+   * This field is the documented lever for bounding reasoning specifically.
+   */
   maxTokens?: number;
   exclude?: boolean;
+  /**
+   * Per-stage override for the reasoning-call timeout. Falls back to
+   * REASONING_STAGE_TIMEOUT_MS when unset, so every existing preset (A/B/C/E)
+   * is unaffected.
+   */
+  timeoutMs?: number;
 }
 
 export interface CompletionRequest {
@@ -220,7 +234,8 @@ export const DEFAULT_TIMEOUT_MS = 90_000;
 export const REASONING_STAGE_TIMEOUT_MS = 120_000;
 
 export function timeoutForReasoning(reasoning?: ReasoningConfig): number | undefined {
-  return reasoning ? REASONING_STAGE_TIMEOUT_MS : undefined;
+  if (!reasoning) return undefined;
+  return reasoning.timeoutMs ?? REASONING_STAGE_TIMEOUT_MS;
 }
 
 export class ProviderTimeoutError extends Error {
@@ -328,7 +343,24 @@ export function createOpenRouterTransport(apiKey: string): Transport {
           ],
           max_tokens: req.maxOutputTokens,
           temperature: req.temperature ?? 0.7,
-          ...(req.reasoning ? { reasoning: req.reasoning } : {}),
+          // Built field-by-field rather than passed through verbatim: the TS
+          // type uses maxTokens/timeoutMs (repo convention), but OpenRouter's
+          // actual API field is reasoning.max_tokens, and timeoutMs is ours
+          // alone (consumed by timeoutForReasoning, never sent). A verbatim
+          // passthrough would have serialized "maxTokens" — a key the provider
+          // does not recognize and silently ignores — which is exactly what
+          // happened here until now: no preset had ever set it, so the bug was
+          // latent rather than causing a visible failure.
+          ...(req.reasoning
+            ? {
+                reasoning: {
+                  ...(req.reasoning.enabled !== undefined ? { enabled: req.reasoning.enabled } : {}),
+                  ...(req.reasoning.effort !== undefined ? { effort: req.reasoning.effort } : {}),
+                  ...(req.reasoning.maxTokens !== undefined ? { max_tokens: req.reasoning.maxTokens } : {}),
+                  ...(req.reasoning.exclude !== undefined ? { exclude: req.reasoning.exclude } : {}),
+                },
+              }
+            : {}),
           ...(req.jsonSchema
             ? {
                 response_format: {

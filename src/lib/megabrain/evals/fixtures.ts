@@ -1,6 +1,7 @@
 import { LEVERAGE_KINDS, type CaseAnalysis } from "../schemas";
 import {
   ProviderHttpError,
+  ProviderTimeoutError,
   type CompletionRequest,
   type CompletionResult,
   type ResponseTelemetry,
@@ -387,6 +388,8 @@ interface FixtureOptions {
   reportedModel?: string;
   /** Throw a provider 404 at the strategy stage, as the first live run did. */
   failAtStrategise?: boolean;
+  /** Throw a reasoning-stage timeout at the strategy stage, as D Premium's live run did. */
+  timeoutAtStrategise?: boolean;
   /** Report a charge far above what could have been reserved. */
   overcharge?: boolean;
   /**
@@ -577,6 +580,9 @@ export function fixtureTransport(opts: FixtureOptions): Transport {
     }
     if (name === "case_plan") {
       if (opts.failAtStrategise) throw new ProviderHttpError(404, req.modelSlug, "404");
+      if (opts.timeoutAtStrategise) {
+        throw new ProviderTimeoutError("strategise", req.modelSlug, 170_000, 170_000, "transport_timeout", true, false, false);
+      }
       strategiseCalls++;
       // The critic reuses the plan schema; the second such call is the revision.
       if (opts.criticGarbage && strategiseCalls > 1) {

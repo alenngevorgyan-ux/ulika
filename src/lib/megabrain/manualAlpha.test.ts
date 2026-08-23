@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MANUAL_PRESETS, manualPreflightReservations, parseKnowledgeMode, resolveManualPreset } from "./manualPresets";
-import { projectAdvicePipeline } from "./engine";
+import { projectAdvicePipeline, reservationCeiling } from "./engine";
+import { AccountingError, CostLedger } from "./costLedger";
+import { MODELS } from "./modelRouter";
 import { projectCaseSafety } from "./caseSafety";
 import { fullTextAllowed, retrieveManualKnowledge, SOURCE_REGISTRY } from "./manualKnowledge";
 import { getSavedCase, listSavedCases, saveCase } from "./savedCases";
@@ -52,7 +54,129 @@ describe("Manual Alpha server controls", () => {
     expect(reservation.externalUsd).toBeCloseTo(base * 2.5, 10);
     expect(reservation.externalUsd).toBeGreaterThan(preset.capUsd);
   });
+});
 
+/**
+ * D Premium's reservation, fixed against real live evidence.
+ *
+ * A live D run on qwen/qwen3.6-max-preview requested max_tokens=3000 for
+ * strategise and was billed for 6237 total completion tokens (3233 of them
+ * reasoning) — max_tokens bounded the visible output as expected but did
+ * nothing to bound reasoning, which is billed as completion tokens on top.
+ * The per-call reservation, previously computed from max_tokens alone,
+ * rejected that real charge as COST_ABOVE_RESERVED even though the whole
+ * case was nowhere near its overall cap. These tests pin that exact case.
+ */
+describe("D Premium reservation reflects Qwen's real reasoning-token behavior", () => {
+  const qwen = MODELS["qwen-3.6-max-preview"];
+  const strategiseReasoning = resolveManualPreset("D").execution.reasoning!.strategise!;
+
+  it("D still asks for the exact same Qwen slug — only the reservation changed", () => {
+    expect(resolveManualPreset("D").execution.finalModelKey).toBe("qwen-3.6-max-preview");
+    expect(qwen.slug).toBe("qwen/qwen3.6-max-preview");
+  });
+
+  it("carries a real reasoning budget now, not just enabled:true", () => {
+    // Before this fix, D's reasoning config never set maxTokens at all — the
+    // model could reason without limit and nothing in the reservation knew.
+    expect(strategiseReasoning.maxTokens).toBeGreaterThan(0);
+    expect(strategiseReasoning.enabled).toBe(true);
+  });
+
+  it("reservationCeiling adds the reasoning budget on top of the visible-output ceiling", () => {
+    expect(reservationCeiling(3000, strategiseReasoning)).toBe(3000 + strategiseReasoning.maxTokens!);
+    // A stage with no reasoning config (A/B/C's default posture) is unaffected.
+    expect(reservationCeiling(3000, undefined)).toBe(3000);
+    expect(reservationCeiling(3000, { enabled: true })).toBe(3000);
+  });
+
+  it("the exact live overage — 6237 total completion tokens, 3233 of them reasoning — now clears the reservation", () => {
+    const ledger = new CostLedger("standard", 0.2);
+    const ceiling = reservationCeiling(3000, strategiseReasoning);
+    const { projectedUsd } = ledger.reserve("strategise", qwen, "x".repeat(3582 * 3), ceiling, {
+      attemptId: "test-live-overage",
+      retryNumber: 0,
+    });
+    // Real numbers from the live acceptance run, verbatim.
+    const usage = {
+      inputTokens: 3582,
+      cachedTokens: 0,
+      reasoningTokens: 3233,
+      outputTokens: 6237,
+      actualCostUsd: 0.042111108,
+      rawCost: 0.042111108,
+    };
+    expect(() =>
+      ledger.record({
+        stage: "strategise",
+        spec: qwen,
+        usage,
+        latencyMs: 113_438,
+        attemptId: "test-live-overage",
+        retryNumber: 0,
+        reservedUsd: projectedUsd,
+      })
+    ).not.toThrow();
+    expect(ledger.allDeep()[0].accountingFailure).toBeNull();
+  });
+
+  it("still fails closed on a charge that genuinely exceeds even the new reservation", () => {
+    // The guard must remain real, not just wider. A charge that blows past a
+    // budget nearly double the old one is still a genuine overcharge signal.
+    const ledger = new CostLedger("standard", 0.2);
+    const ceiling = reservationCeiling(3000, strategiseReasoning);
+    const { projectedUsd } = ledger.reserve("strategise", qwen, "x".repeat(3582 * 3), ceiling, {
+      attemptId: "test-genuine-overcharge",
+      retryNumber: 0,
+    });
+    const usage = {
+      inputTokens: 3582,
+      cachedTokens: 0,
+      reasoningTokens: 20_000,
+      outputTokens: 23_000,
+      actualCostUsd: projectedUsd + 0.05,
+      rawCost: projectedUsd + 0.05,
+    };
+    let caught: unknown;
+    try {
+      ledger.record({
+        stage: "strategise", spec: qwen, usage, latencyMs: 200_000,
+        attemptId: "test-genuine-overcharge", retryNumber: 0, reservedUsd: projectedUsd,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AccountingError);
+    expect((caught as AccountingError).code).toBe("COST_ABOVE_RESERVED");
+    // Fail-closed, and the evidence survives: the entry is written before the throw.
+    expect(ledger.allDeep()[0].accountingFailure).toBe("COST_ABOVE_RESERVED");
+    expect(ledger.allDeep()[0].actualCostUsd).toBe(usage.actualCostUsd);
+  });
+
+  it("D's per-case cap fits a realistic full pipeline (strategise + final) without ever trying to be unlimited", () => {
+    const preset = resolveManualPreset("D");
+    const finalReasoning = preset.execution.reasoning!.final!;
+    const strategiseCeiling = reservationCeiling(3000, strategiseReasoning);
+    const finalCeiling = reservationCeiling(2200, finalReasoning);
+    // Worst-case reservation for the two Qwen calls alone, same formula
+    // stage() uses (costOf * RESERVATION_SAFETY_MARGIN), with generous
+    // stand-in input sizes so this doesn't silently drift with prompt text.
+    const worstCaseUsd =
+      ((5225 * qwen.inputPerMTok + strategiseCeiling * qwen.outputPerMTok) / 1_000_000) * 1.35 +
+      ((4000 * qwen.inputPerMTok + finalCeiling * qwen.outputPerMTok) / 1_000_000) * 1.35;
+    expect(worstCaseUsd).toBeLessThan(preset.capUsd);
+    // And it isn't vacuously true — this is a real, non-trivial fraction of
+    // the cap, not a cap so large the reservation could never matter.
+    expect(worstCaseUsd).toBeGreaterThan(preset.capUsd * 0.5);
+    // A genuinely unbounded reasoning run (the model's real 65,536-token
+    // completion ceiling) would cost far more than the cap — the cap still
+    // means something, it isn't just raised to make every failure vanish.
+    const unboundedUsd = (qwen.maxCompletionTokens as number) * qwen.outputPerMTok / 1_000_000;
+    expect(unboundedUsd).toBeGreaterThan(preset.capUsd * 2);
+  });
+});
+
+describe("Manual Alpha server controls, continued", () => {
   it("Knowledge OFF performs no retrieval and REFERENCE_ONLY never enters full text", () => {
     expect(retrieveManualKnowledge("off", "negotiation conflict").cards).toEqual([]);
     expect(retrieveManualKnowledge("off", "negotiation conflict").block).toBe("");

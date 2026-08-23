@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCase, renderAnalysis, MAX_OUTPUT_TOKENS } from "./engine";
 import { CostLedger } from "./costLedger";
-import { OutputTruncatedError, ProviderHttpError, isTruncatedFinish, readTelemetry, type Transport } from "./transport";
+import { OutputTruncatedError, ProviderHttpError, ProviderTimeoutError, isTruncatedFinish, readTelemetry, type Transport } from "./transport";
 import { RunRecorder, describeFailure } from "./runRecorder";
 import { buildDiagnostics, normalizeKind, safeSchemaPaths } from "./labDiagnostics";
 import { fixtureTransport, GOOD_ANALYSIS } from "./evals/fixtures";
@@ -96,6 +96,37 @@ describe("a model that finished but wrote bad JSON keeps its one retry", () => {
     expect(calls.n).toBe(4);
     expect(out.analysis.plan.conclusion.length).toBeGreaterThan(0);
     expect(book.allDeep().filter((e) => e.retryNumber > 0)).toHaveLength(1);
+  });
+});
+
+describe("a reasoning-stage provider timeout is never auto-retried", () => {
+  it("throws once, calls strategise exactly once, and records exactly one unreported attempt", async () => {
+    // D Premium's live evidence: strategise timed out once at 120s. The engine
+    // must fail the whole case rather than spend a second reservation on an
+    // identical retry — MAX_JSON_RETRIES only ever covers unparseable JSON,
+    // never a timeout, and this pins that this stays true for a
+    // reasoning-enabled stage specifically.
+    const calls = { n: 0 };
+    const book = ledger();
+    const err = await runCase(
+      {
+        account: SECRET_ACCOUNT,
+        ledger: book,
+        execution: {
+          analysisConfigurationId: "manual-premium",
+          finalModelKey: "qwen-3.6-max-preview",
+          maxJsonRetries: 0,
+          reasoning: { strategise: { enabled: true, exclude: true, maxTokens: 6_000, timeoutMs: 170_000 } },
+        },
+      },
+      fixtureTransport({ timeoutAtStrategise: true, callCount: calls })
+    ).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ProviderTimeoutError);
+    const strategiseEntries = book.allDeep().filter((e) => e.stage === "strategise");
+    expect(strategiseEntries).toHaveLength(1);
+    expect(strategiseEntries[0].costSource).toBe("unreported");
+    expect(strategiseEntries[0].actualCostUsd).toBeNull();
   });
 });
 
